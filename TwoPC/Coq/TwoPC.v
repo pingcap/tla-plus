@@ -142,7 +142,7 @@ Inductive StateMultiStep : State -> State -> Prop :=
       StateMultiStep state state
 | StateMultiStep1 :
     forall state state1 state2,
-      StateMultiStep state1 state2 ->
+      StateStep state1 state2 ->
       StateMultiStep state state1 ->
       StateMultiStep state state2.
 
@@ -275,7 +275,9 @@ Lemma Safety' :
     Invariant state ->
     Invariant state'.
 Proof.
-  induction 1; crush.
+  induction 1; intros.
+  + auto.
+  + eapply StateStepKeepsInvariant; eauto.
 Qed.
 
 Theorem Safety :
