@@ -269,6 +269,48 @@ TypeInvariant ==
 
 Invariant == TypeInvariant
 
+checkWriteOrder(w1, w2) ==
+  /\ w1.commit_ts < w2.commit_ts
+  /\ w1.start_ts < w2.start_ts
+
+\* The committed write timestamp of the key must be in order, and for each
+\* write, the commit_ts should be strictly greater than start_ts.
+WriteConsistency ==
+  /\ \A k \in KEY :
+       \A n \in 1..Len(key_write[k]) - 1 :
+         checkWriteOrder(key_write[k][n], key_write[k][n + 1])
+  /\ \A k \in KEY :
+       \A n \in 1..Len(key_write[k]) :
+         key_write[k][n].start_ts < key_write[k][n].commit_ts
+
+CommittedConsistency ==
+  \A c \in CLIENT :
+    LET
+      start_ts == client_ts[c].start_ts
+      commit_ts == client_ts[c].commit_ts
+      primary == client_key[c].primary
+      secondary == client_key[c].secondary
+      w == [start_ts |-> start_ts, commit_ts |-> commit_ts]
+    IN
+      client_state[c] = "committed" =>
+        \* The primary key lock must be cleaned up, and no any older lock.
+        /\ ~hasLockLE(primary, start_ts)
+        /\ findWriteWithCommitTS(primary, commit_ts) = {w}
+        /\ start_ts \in key_data[primary]
+        /\ \A k \in secondary :
+           \* The secondary key lock can be empty or not.
+           /\ \/ /\ ~hasLockEQ(k, start_ts)
+                 /\ findWriteWithCommitTS(k, commit_ts) = {w}
+                 /\ ~hasLockLE(k, start_ts - 1)
+              \/ /\ hasLockEQ(k, start_ts)
+                 /\ findWriteWithCommitTS(k, commit_ts) = {}
+                 /\ (Len(key_write[k]) > 0 =>
+                      \* Lock has not been cleaned up, so the last write committed
+                      \* timestamp must be less than lock start ts.
+                      key_write[k][Len(key_write[k])].commit_ts < start_ts)
+           /\ start_ts \in key_data[k]
+
+\* TLAPS proof for proving Spec keeps invariant.
 LEMMA InitStateSatisfiesInvariant ==
   KEY # {} /\ Init => Invariant
 PROOF
@@ -371,46 +413,5 @@ PROOF
               KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv
   <2> QED BY <1>d
 <1> QED BY <1>a, <1>b, <1>c, <1>d DEF ClientOp
-
-checkWriteOrder(w1, w2) ==
-  /\ w1.commit_ts < w2.commit_ts
-  /\ w1.start_ts < w2.start_ts
-
-\* The committed write timestamp of the key must be in order, and for each
-\* write, the commit_ts should be strictly greater than start_ts.
-WriteConsistency ==
-  /\ \A k \in KEY :
-       \A n \in 1..Len(key_write[k]) - 1 :
-         checkWriteOrder(key_write[k][n], key_write[k][n + 1])
-  /\ \A k \in KEY :
-       \A n \in 1..Len(key_write[k]) :
-         key_write[k][n].start_ts < key_write[k][n].commit_ts
-
-CommittedConsistency ==
-  \A c \in CLIENT :
-    LET
-      start_ts == client_ts[c].start_ts
-      commit_ts == client_ts[c].commit_ts
-      primary == client_key[c].primary
-      secondary == client_key[c].secondary
-      w == [start_ts |-> start_ts, commit_ts |-> commit_ts]
-    IN
-      client_state[c] = "committed" =>
-        \* The primary key lock must be cleaned up, and no any older lock.
-        /\ ~hasLockLE(primary, start_ts)
-        /\ findWriteWithCommitTS(primary, commit_ts) = {w}
-        /\ start_ts \in key_data[primary]
-        /\ \A k \in secondary :
-           \* The secondary key lock can be empty or not.
-           /\ \/ /\ ~hasLockEQ(k, start_ts)
-                 /\ findWriteWithCommitTS(k, commit_ts) = {w}
-                 /\ ~hasLockLE(k, start_ts - 1)
-              \/ /\ hasLockEQ(k, start_ts)
-                 /\ findWriteWithCommitTS(k, commit_ts) = {}
-                 /\ (Len(key_write[k]) > 0 =>
-                      \* Lock has not been cleaned up, so the last write committed
-                      \* timestamp must be less than lock start ts.
-                      key_write[k][Len(key_write[k])].commit_ts < start_ts)
-           /\ start_ts \in key_data[k]
 
 =================================================================================
