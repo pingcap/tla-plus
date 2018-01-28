@@ -33,6 +33,8 @@ VARIABLES key_lock
 \* A committed version of the key is a record of [start_ts: ts, commit_ts: ts].
 VARIABLES key_write  \* TODO: rw eventually
 
+vars == <<next_ts, client_state, client_ts, client_key, key_data, key_lock, key_write>>
+
 \* Checks whether there is a lock of key $k$, whose $ts$ is less or equal than
 \* $ts$.
 hasLockLE(k, ts) ==
@@ -216,21 +218,24 @@ ClientOp(c) ==
 
 Next == \E c \in CLIENT : ClientOp(c)
 
-\* Selects a primary key and use the rest for the secondary keys.
-chooseKey(ks) ==
-  LET
-    primary == CHOOSE k \in ks : TRUE
-  IN
-    [primary |-> primary, secondary |-> ks \ {primary}]
-
 Init ==
-  /\ next_ts = 0
-  /\ client_state = [c \in CLIENT |-> "init"]
-  /\ client_ts = [c \in CLIENT |-> [start_ts |-> 0, commit_ts |-> 0]]
-  /\ client_key = [c \in CLIENT |-> chooseKey(KEY)]
-  /\ key_lock = [k \in KEY |-> {}]
-  /\ key_write = [k \in KEY |-> <<>>]
-  /\ key_data = [k \in KEY |-> {}]
+  LET
+    \* Selects a primary key and use the rest for the secondary keys.
+    chooseKey(ks) ==
+    LET
+      primary == CHOOSE k \in ks : TRUE
+    IN
+      [primary |-> primary, secondary |-> ks \ {primary}]
+  IN
+    /\ next_ts = 0
+    /\ client_state = [c \in CLIENT |-> "init"]
+    /\ client_ts = [c \in CLIENT |-> [start_ts |-> 0, commit_ts |-> 0]]
+    /\ client_key = [c \in CLIENT |-> chooseKey(KEY)]
+    /\ key_lock = [k \in KEY |-> {}]
+    /\ key_write = [k \in KEY |-> <<>>]
+    /\ key_data = [k \in KEY |-> {}]
+
+PercolatorSpec == Init /\ [][Next]_vars
 
 NextTsTypeInv ==
   next_ts \in Nat
@@ -267,7 +272,7 @@ Invariant == TypeInvariant
 LEMMA InitStateSatisfiesInvariant ==
   KEY # {} /\ Init => Invariant
 PROOF
-<1> USE DEF Init, chooseKey
+<1> USE DEF Init
 <1> USE DEF Invariant, TypeInvariant
 <1> USE DEF NextTsTypeInv, ClientStateTypeInv, ClientTsTypeInv, ClientKeyTypeInv,
             KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv
@@ -297,7 +302,7 @@ PROOF
 <1> USE DEF Invariant, TypeInvariant
 <1> PICK c \in CLIENT : ClientOp(c) BY DEF Next
 <1>a CASE Start(c)
-  <2> USE DEF Start, chooseKey
+  <2> USE DEF Start
   <2> USE DEF NextTsTypeInv, ClientStateTypeInv, ClientTsTypeInv, ClientKeyTypeInv,
               KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv
   <2> QED BY <1>a
