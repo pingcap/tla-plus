@@ -32,7 +32,7 @@ VARIABLES key_lock
 
 \* $key_write[k]$ is a sequence of committed version of the key.
 \* A committed version of the key is a record of [start_ts: ts, commit_ts: ts].
-VARIABLES key_write  \* TODO: rw eventually for read logging
+VARIABLES key_write  \* TODO: Rename to key_rw so we can also log reads?
 
 vars == <<next_ts, client_state, client_ts, client_key, key_data, key_lock, key_write>>
 
@@ -267,8 +267,6 @@ TypeInvariant ==
   /\ KeyLockTypeInv
   /\ KeyWriteTypeInv
 
-Invariant == TypeInvariant
-
 checkWriteOrder(w1, w2) ==
   /\ w1.commit_ts < w2.commit_ts
   /\ w1.start_ts < w2.start_ts
@@ -310,12 +308,11 @@ CommittedConsistency ==
                       key_write[k][Len(key_write[k])].commit_ts < start_ts)
            /\ start_ts \in key_data[k]
 
-\* TLAPS proof for proving Spec keeps invariant.
-LEMMA InitStateSatisfiesInvariant ==
-  KEY # {} /\ Init => Invariant
+\* TLAPS proof for proving Spec keeps type invariant.
+LEMMA InitStateSatisfiesTypeInvariant ==
+  KEY # {} /\ Init => TypeInvariant
 PROOF
-<1> USE DEF Init
-<1> USE DEF Invariant, TypeInvariant
+<1> USE DEF Init, TypeInvariant
 <1> USE DEF NextTsTypeInv, ClientStateTypeInv, ClientTsTypeInv, ClientKeyTypeInv,
             KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv
 <1> QED BY SMT
@@ -337,11 +334,11 @@ PROOF
      BY DEF findWriteWithStartTS, ws, Type
 <1> QED BY Z3, <1>c
 
-LEMMA NextKeepsInvariant ==
-  Invariant /\ Next => Invariant'
+LEMMA NextKeepsTypeInvariant ==
+  TypeInvariant /\ Next => TypeInvariant'
 PROOF
-<1> SUFFICES ASSUME Invariant, Next PROVE Invariant' OBVIOUS
-<1> USE DEF Invariant, TypeInvariant
+<1> SUFFICES ASSUME TypeInvariant, Next PROVE TypeInvariant' OBVIOUS
+<1> USE DEF TypeInvariant
 <1> PICK c \in CLIENT : ClientOp(c) BY DEF Next
 <1>a CASE Start(c)
   <2> USE DEF Start
@@ -413,5 +410,11 @@ PROOF
               KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv
   <2> QED BY <1>d
 <1> QED BY <1>a, <1>b, <1>c, <1>d DEF ClientOp
+
+THEOREM TypeSafety ==
+  KEY # {} /\ PercolatorSpec => []TypeInvariant
+<1> SUFFICES ASSUME KEY # {} /\ Init /\ [][Next]_vars PROVE []TypeInvariant
+    BY DEF PercolatorSpec
+<1> QED BY InitStateSatisfiesTypeInvariant, NextKeepsTypeInvariant, PTL
 
 =================================================================================
