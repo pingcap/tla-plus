@@ -162,7 +162,7 @@ canCommit(c) ==
     /\ \A k \in secondary :
         /\ hasLockEQ(k, start_ts)
 
-\* Commit the primary key.
+\* Commits the primary key.
 commitPrimary(c) ==
   LET
     start_ts == client_ts[c].start_ts
@@ -210,11 +210,18 @@ Commit(c) ==
   \* If we commit the primary key successfully, we can think the transaction is
   \* committed.
 
+Abort(c) ==
+  /\ client_state[c] # "committed" \* We can choose to abort at any time if not
+                                   \* committed.
+  /\ client_state' = [client_state EXCEPT ![c] = "aborted"]
+  /\ UNCHANGED <<next_ts, client_ts, client_key, key_lock, key_data, key_write>>
+
 ClientOp(c) ==
   \/ Start(c)
   \/ Get(c)
   \/ Prewrite(c)
   \/ Commit(c)
+  \/ Abort(c)
 
 Next == \E c \in CLIENT : ClientOp(c)
 
@@ -241,7 +248,7 @@ NextTsTypeInv ==
   next_ts \in Nat
 
 ClientStateTypeInv ==
-  client_state \in [CLIENT -> {"init", "working", "prewriting", "committing", "committed"}]
+  client_state \in [CLIENT -> {"init", "working", "prewriting", "committing", "committed", "aborted"}]
 
 ClientTsTypeInv ==
   client_ts \in [CLIENT -> [start_ts : Nat, commit_ts : Nat]]
@@ -409,7 +416,12 @@ PROOF
   <2> USE DEF NextTsTypeInv, ClientStateTypeInv, ClientTsTypeInv, ClientKeyTypeInv,
               KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv
   <2> QED BY <1>d
-<1> QED BY <1>a, <1>b, <1>c, <1>d DEF ClientOp
+<1>e CASE Abort(c)
+  <2> USE DEF Abort
+  <2> USE DEF NextTsTypeInv, ClientStateTypeInv, ClientTsTypeInv, ClientKeyTypeInv,
+              KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv
+  <2> QED BY <1>e
+<1> QED BY <1>a, <1>b, <1>c, <1>d, <1>e DEF ClientOp
 
 THEOREM TypeSafety ==
   KEY # {} /\ PercolatorSpec => []TypeInvariant
