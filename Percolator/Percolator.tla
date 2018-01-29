@@ -1,9 +1,11 @@
 ------------------------------- MODULE Percolator -------------------------------
 
-EXTENDS Integers, FiniteSets, Sequences, TLAPS
+EXTENDS Integers, Sequences, TLAPS
 
 \* The set of transaction keys.
 CONSTANTS KEY
+
+AXIOM KeyNotEmpty == KEY # {} \* Keys cannot be empty.
 
 \* The set of clients to execute a transaction.
 CONSTANTS CLIENT
@@ -57,8 +59,8 @@ canPrewrite(c) ==
         /\ ~hasLockLE(k, start_ts)
 
 \* Returns TRUE if a lock can be cleanup up.
-\* A lock can be cleaned up iff,
-\*  1. The lock is a primary lock, and its ts is less than or equal to $ts$.
+\* A lock can be cleaned up iff its ts is less than or equal to $ts$, and
+\*  1. The lock is a primary lock.
 \*  2. Or the lock is a secondary lock, and the associated primary key (<= ts)
 \*     has been cleaned up.
 isStaleLock(k, l, ts) ==
@@ -248,7 +250,8 @@ NextTsTypeInv ==
   next_ts \in Nat
 
 ClientStateTypeInv ==
-  client_state \in [CLIENT -> {"init", "working", "prewriting", "committing", "committed", "aborted"}]
+  client_state \in [CLIENT -> {"init", "working", "prewriting",
+                               "committing", "committed", "aborted"}]
 
 ClientTsTypeInv ==
   client_ts \in [CLIENT -> [start_ts : Nat, commit_ts : Nat]]
@@ -310,19 +313,19 @@ CommittedConsistency ==
               \/ /\ hasLockEQ(k, start_ts)
                  /\ findWriteWithCommitTS(k, commit_ts) = {}
                  /\ (Len(key_write[k]) > 0 =>
-                      \* Lock has not been cleaned up, so the last write committed
-                      \* timestamp must be less than lock start ts.
+                      \* Lock has not been cleaned up, so the last write
+                      \* committed timestamp must be less than lock start_ts.
                       key_write[k][Len(key_write[k])].commit_ts < start_ts)
            /\ start_ts \in key_data[k]
 
 \* TLAPS proof for proving Spec keeps type invariant.
 LEMMA InitStateSatisfiesTypeInvariant ==
-  KEY # {} /\ Init => TypeInvariant
+  Init => TypeInvariant
 PROOF
 <1> USE DEF Init, TypeInvariant
 <1> USE DEF NextTsTypeInv, ClientStateTypeInv, ClientTsTypeInv, ClientKeyTypeInv,
             KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv
-<1> QED BY SMT
+<1> QED BY SMT, KeyNotEmpty
 
 LEMMA findWriteWithStartTSTypeInv ==
   ASSUME key_write \in [KEY -> Seq([start_ts: Nat, commit_ts: Nat])],
@@ -424,9 +427,15 @@ PROOF
 <1> QED BY <1>a, <1>b, <1>c, <1>d, <1>e DEF ClientOp
 
 THEOREM TypeSafety ==
-  KEY # {} /\ PercolatorSpec => []TypeInvariant
-<1> SUFFICES ASSUME KEY # {} /\ Init /\ [][Next]_vars PROVE []TypeInvariant
+  PercolatorSpec => []TypeInvariant
+PROOF
+<1> SUFFICES ASSUME Init /\ [][Next]_vars PROVE []TypeInvariant
     BY DEF PercolatorSpec
 <1> QED BY InitStateSatisfiesTypeInvariant, NextKeepsTypeInvariant, PTL
+
+THEOREM Safety ==
+  PercolatorSpec => [](/\ TypeInvariant
+                       /\ WriteConsistency
+                       /\ CommittedConsistency)
 
 =================================================================================
