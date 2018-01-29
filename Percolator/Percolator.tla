@@ -26,12 +26,13 @@ VARIABLES client_key
 VARIABLES key_data
 
 \* $key_lock[k]$ is the set of lock. A lock is of a record
-\* [ts: ts, primary: lock]. ts is for start_ts.
+\* [ts: ts, primary: lock]. $ts$ is for start_ts. If $primary$ equals to $k$,
+\* it is a primary lock, otherwise secondary lock.
 VARIABLES key_lock
 
 \* $key_write[k]$ is a sequence of committed version of the key.
 \* A committed version of the key is a record of [start_ts: ts, commit_ts: ts].
-VARIABLES key_write  \* TODO: rw eventually
+VARIABLES key_write  \* TODO: rw eventually for read logging
 
 vars == <<next_ts, client_state, client_ts, client_key, key_data, key_lock, key_write>>
 
@@ -61,17 +62,16 @@ canPrewrite(c) ==
 \*  2. Or the lock is a secondary lock, and the associated primary key (<= ts)
 \*     has been cleaned up.
 isStaleLock(k, l, ts) ==
-  \/ /\ l.primary = k  \* this is a primary lock.
-     /\ l.ts <= ts
-  \/ /\ l.primary # k  \* this is a secondary lock.
-     /\ ~hasLockEQ(l.primary, l.ts)
-     /\ l.ts <= ts
+  /\ l.ts <= ts
+  /\ \/ /\ l.primary = k  \* this is a primary lock.
+     \/ /\ l.primary # k  \* this is a secondary lock.
+        /\ ~hasLockEQ(l.primary, l.ts)
 
 \* Returns TRUE if we have a stale lock for key $k$.
 hasStaleLock(k, ts) ==
   \E l \in key_lock[k] : isStaleLock(k, l, ts)
 
-\* Returns the write with start_ts equals to $ts$.
+\* Returns the writes with start_ts equals to $ts$.
 findWriteWithStartTS(k, ts) ==
   {key_write[k][w] : w \in {w \in DOMAIN key_write[k] : key_write[k][w].start_ts = ts}}
 
