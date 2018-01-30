@@ -1,6 +1,6 @@
 ------------------------------- MODULE Percolator ------------------------------
 
-EXTENDS Integers, Sequences, TLAPS
+EXTENDS Integers, FiniteSets, Sequences, TLAPS
 
 \* The set of transaction keys.
 CONSTANTS KEY
@@ -60,15 +60,9 @@ canGoPrewrite(c) ==
         /\ ~hasLockLE(k, start_ts)
 
 \* Returns TRUE if a lock can be cleanup up.
-\* A lock can be cleaned up iff its ts is less than or equal to $ts$, and
-\*  1. The lock is a primary lock.
-\*  2. Or the lock is a secondary lock, and the associated primary key (<= ts)
-\*     has been cleaned up.
+\* A lock can be cleaned up iff its ts is less than or equal to $ts$.
 isStaleLock(k, l, ts) ==
-  /\ l.ts <= ts
-  /\ \/ /\ l.primary = k  \* this is a primary lock.
-     \/ /\ l.primary # k  \* this is a secondary lock.
-        /\ ~hasLockEQ(l.primary, l.ts)
+  l.ts <= ts
 
 \* Returns TRUE if we have a stale lock for key $k$.
 hasStaleLock(k, ts) ==
@@ -90,10 +84,10 @@ findWriteWithCommitTS(k, ts) ==
 cleanupStaleLock(k, ts) ==
   \E l \in key_lock[k] :
     /\ isStaleLock(k, l, ts)
-    /\ key_lock' = [key_lock EXCEPT ![k] = @ \ {l}]
     /\ \/ /\ l.primary = k  \* this is a primary key, always rollback
                             \* because it is not committed.
           /\ key_data' = [key_data EXCEPT ![k] = @ \ {l.ts}]
+          /\ key_lock' = [key_lock EXCEPT ![k] = @ \ {l}]
           /\ UNCHANGED <<key_write>>
        \/ /\ l.primary # k  \* this is a secondary key.
           /\ LET
@@ -102,11 +96,21 @@ cleanupStaleLock(k, ts) ==
                 IF ws = {}
                 THEN
                   \* the primary key is not committed, clean up the data.
-                  /\ key_data' = [key_data EXCEPT ![k] = @ \ {l.ts}]
-                  /\ UNCHANGED <<key_write>>
+                  \* Note we should always clean up the corresponding primary
+                  \* lock first, then this secondary lock.
+                  IF hasLockEQ(l.primary, l.ts)
+                  THEN
+                    /\ key_data' = [key_data EXCEPT ![l.primary] = @ \ {l.ts}]
+                    /\ key_lock' = [key_lock EXCEPT ![l.primary] = @ \ {l}]
+                    /\ UNCHANGED <<key_write>>
+                  ELSE
+                    /\ key_data' = [key_data EXCEPT ![k] = @ \ {l.ts}]
+                    /\ key_lock' = [key_lock EXCEPT ![k] = @ \ {l}]
+                    /\ UNCHANGED <<key_write>>
                 ELSE
                   \* the primary key is committed, commit the secondary key.
                   \E w \in ws :
+                    /\ key_lock' = [key_lock EXCEPT ![k] = @ \ {l}]
                     /\ key_write' = [key_write EXCEPT ![k] = Append(@, w)]
                     /\ UNCHANGED <<key_data>>
 
@@ -301,6 +305,19 @@ WriteConsistency ==
        \A n \in 1..Len(key_write[k]) :
          key_write[k][n].start_ts < key_write[k][n].commit_ts
 
+LockConsistency ==
+  \* There should be at most one lock for each key.
+  /\ \A k \in KEY :
+       Cardinality(key_lock[k]) <= 1
+  \* When the client finishes prewriting and is ready for commit, if the
+  \* primary lock exists, all secondary locks should exist.
+  /\ \A c \in CLIENT :
+       (/\ client_state[c] = "committing"
+        /\ hasLockEQ(client_key[c].primary, client_ts[c].start_ts)
+       ) =>
+         \A k \in client_key[c].secondary :
+           hasLockEQ(k, client_ts[c].start_ts)
+
 CommittedConsistency ==
   \A c \in CLIENT :
     LET
@@ -447,6 +464,7 @@ PROOF
 THEOREM Safety ==
   PercolatorSpec => [](/\ TypeInvariant
                        /\ WriteConsistency
+                       /\ LockConsistency
                        /\ CommittedConsistency)
 
 ================================================================================
