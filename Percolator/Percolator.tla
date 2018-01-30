@@ -38,6 +38,7 @@ VARIABLES key_write  \* TODO: Rename to key_rw so we can also log reads?
 
 vars == <<next_ts, client_state, client_ts, client_key, key_data, key_lock, key_write>>
 
+---------------------------------------------------------------------------------
 \* Checks whether there is a lock of key $k$, whose $ts$ is less or equal than
 \* $ts$.
 hasLockLE(k, ts) ==
@@ -175,6 +176,7 @@ commitPrimary(c) ==
     /\ key_lock' = [key_lock EXCEPT ![primary] = @ \ {[ts |-> start_ts, primary |-> primary]}]
     /\ UNCHANGED <<key_data>>
 
+\* Assigns $start_ts$ to the transaction.
 Start(c) ==
   /\ client_state[c] = "init"
   /\ next_ts' = next_ts + 1
@@ -182,6 +184,8 @@ Start(c) ==
   /\ client_ts' = [client_ts EXCEPT ![c].start_ts = next_ts']
   /\ UNCHANGED <<key_lock, key_data, key_write, client_key>>
 
+\* Advances to prewrite phase if no locks, otherwise tries to clean up one stale
+\* lock.
 Get(c) ==
   /\ client_state[c] = "working"
   /\ IF canPrewrite(c)
@@ -192,6 +196,8 @@ Get(c) ==
          /\ cleanup(c)
          /\ UNCHANGED <<next_ts, client_state, client_ts, client_key>>
 
+\* Enters commit phase if all locks are granted, otherwise tries to lock the
+\* primary lock and secondary locks.
 Prewrite(c) ==
   /\ client_state[c] = "prewriting"
   /\ IF canCommit(c)
@@ -204,17 +210,19 @@ Prewrite(c) ==
          /\ lock(c)
          /\ UNCHANGED <<next_ts, client_state, client_ts, client_key>>
 
+\* If we commit the primary key successfully, we can think the transaction is
+\* committed.
 Commit(c) ==
   /\ client_state[c] = "committing"
   /\ commitPrimary(c)
   /\ client_state' = [client_state EXCEPT ![c] = "committed"]
   /\ UNCHANGED <<next_ts, client_ts, client_key>>
-  \* If we commit the primary key successfully, we can think the transaction is
-  \* committed.
 
+\* We can choose to abort at any time if not committed. Hereby, the aborted
+\* state unifies client crash, client abort and transaction failure. The client
+\* simply halts when aborted, and leaves cleanup to future transaction.
 Abort(c) ==
-  /\ client_state[c] # "committed" \* We can choose to abort at any time if not
-                                   \* committed.
+  /\ client_state[c] # "committed"
   /\ client_state' = [client_state EXCEPT ![c] = "aborted"]
   /\ UNCHANGED <<next_ts, client_ts, client_key, key_lock, key_data, key_write>>
 
@@ -246,6 +254,7 @@ Init ==
 
 PercolatorSpec == Init /\ [][Next]_vars
 
+---------------------------------------------------------------------------------
 NextTsTypeInv ==
   next_ts \in Nat
 
@@ -277,6 +286,7 @@ TypeInvariant ==
   /\ KeyLockTypeInv
   /\ KeyWriteTypeInv
 
+---------------------------------------------------------------------------------
 checkWriteOrder(w1, w2) ==
   /\ w1.commit_ts < w2.commit_ts
   /\ w1.start_ts < w2.start_ts
@@ -318,6 +328,7 @@ CommittedConsistency ==
                       key_write[k][Len(key_write[k])].commit_ts < start_ts)
            /\ start_ts \in key_data[k]
 
+---------------------------------------------------------------------------------
 \* TLAPS proof for proving Spec keeps type invariant.
 LEMMA InitStateSatisfiesTypeInvariant ==
   Init => TypeInvariant
