@@ -1,4 +1,4 @@
-------------------------------- MODULE Percolator -------------------------------
+------------------------------- MODULE Percolator ------------------------------
 
 EXTENDS Integers, Sequences, TLAPS
 
@@ -38,7 +38,7 @@ VARIABLES key_write  \* TODO: Rename to key_rw so we can also log reads?
 
 vars == <<next_ts, client_state, client_ts, client_key, key_data, key_lock, key_write>>
 
----------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
 \* Checks whether there is a lock of key $k$, whose $ts$ is less or equal than
 \* $ts$.
 hasLockLE(k, ts) ==
@@ -49,7 +49,7 @@ hasLockEQ(k, ts) ==
   \E l \in key_lock[k] : l.ts = ts
 
 \* Returns TRUE if the client encounters no lock, then can do pre-write.
-canPrewrite(c) ==
+canGoPrewrite(c) ==
   LET
     start_ts == client_ts[c].start_ts
     primary == client_key[c].primary
@@ -155,7 +155,7 @@ lock(c) ==
         /\ lockKey(k, start_ts, primary)
 
 \* Returns TRUE if the client locks all keys.
-canCommit(c) ==
+canGoCommit(c) ==
   LET
     start_ts == client_ts[c].start_ts
     primary == client_key[c].primary
@@ -188,7 +188,7 @@ Start(c) ==
 \* lock.
 Get(c) ==
   /\ client_state[c] = "working"
-  /\ IF canPrewrite(c)
+  /\ IF canGoPrewrite(c)
        THEN
          /\ client_state' = [client_state EXCEPT ![c] = "prewriting"]
          /\ UNCHANGED <<next_ts, key_lock, key_data, key_write, client_ts, client_key>>
@@ -200,7 +200,7 @@ Get(c) ==
 \* primary lock and secondary locks.
 Prewrite(c) ==
   /\ client_state[c] = "prewriting"
-  /\ IF canCommit(c)
+  /\ IF canGoCommit(c)
        THEN
          /\ next_ts' = next_ts + 1
          /\ client_state' = [client_state EXCEPT ![c] = "committing"]
@@ -254,7 +254,7 @@ Init ==
 
 PercolatorSpec == Init /\ [][Next]_vars
 
----------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
 NextTsTypeInv ==
   next_ts \in Nat
 
@@ -286,7 +286,7 @@ TypeInvariant ==
   /\ KeyLockTypeInv
   /\ KeyWriteTypeInv
 
----------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
 checkWriteOrder(w1, w2) ==
   /\ w1.commit_ts < w2.commit_ts
   /\ w1.start_ts < w2.start_ts
@@ -328,7 +328,7 @@ CommittedConsistency ==
                       key_write[k][Len(key_write[k])].commit_ts < start_ts)
            /\ start_ts \in key_data[k]
 
----------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
 \* TLAPS proof for proving Spec keeps type invariant.
 LEMMA InitStateSatisfiesTypeInvariant ==
   Init => TypeInvariant
@@ -388,9 +388,9 @@ PROOF
          BY <3>a, findWriteWithStartTSTypeInv
          DEF ClientTsTypeInv, ClientKeyTypeInv, KeyWriteTypeInv,
              KeyLockTypeInv, KeyDataTypeInv, cleanupStaleLock
-    <3>b CASE canPrewrite(c) = TRUE
+    <3>b CASE canGoPrewrite(c) = TRUE
          BY <1>b, <3>b DEF KeyWriteTypeInv
-    <3>c CASE canPrewrite(c) = FALSE
+    <3>c CASE canGoPrewrite(c) = FALSE
          BY <1>b, <3>a, <3>c DEF KeyWriteTypeInv, ClientKeyTypeInv, ClientTsTypeInv
     <3> QED BY <3>b, <3>c
   <2> QED BY <2>a, <2>b, <2>c, <2>d, <2>e, <2>f, <2>g
@@ -408,15 +408,15 @@ PROOF
   <2>d ClientKeyTypeInv'
        BY <1>c DEF ClientKeyTypeInv
   <2>e KeyDataTypeInv'
-    <3>a CASE canCommit(c) = TRUE
+    <3>a CASE canGoCommit(c) = TRUE
          BY <1>c, <3>a DEF KeyDataTypeInv
-    <3>b CASE canCommit(c) = FALSE
+    <3>b CASE canGoCommit(c) = FALSE
          BY <1>c, <3>b DEF KeyDataTypeInv, ClientKeyTypeInv, ClientTsTypeInv
     <3> QED BY <3>a, <3>b
   <2>f KeyLockTypeInv'
-    <3>a CASE canCommit(c) = TRUE
+    <3>a CASE canGoCommit(c) = TRUE
          BY <1>c, <3>a DEF KeyLockTypeInv
-    <3>b CASE canCommit(c) = FALSE
+    <3>b CASE canGoCommit(c) = FALSE
       <4>a \E k \in KEY : \E l \in [ts : Nat, primary : KEY] :
              key_lock' = [key_lock EXCEPT ![k] = key_lock[k] \cup {l}]
            BY <1>c, <3>b DEF KeyLockTypeInv, ClientKeyTypeInv, ClientTsTypeInv
@@ -449,4 +449,4 @@ THEOREM Safety ==
                        /\ WriteConsistency
                        /\ CommittedConsistency)
 
-=================================================================================
+================================================================================
