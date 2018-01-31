@@ -345,6 +345,14 @@ CommittedConsistency ==
                       key_write[k][Len(key_write[k])].commit_ts < start_ts)
            /\ start_ts \in key_data[k]
 
+\* If one transaction is aborted, there should be no committed primary key.
+AbortedConsistency ==
+  \A c \in CLIENT :
+    (/\ client_state[c] = "aborted"
+     /\ client_ts[c].commit_ts # 0
+    ) =>
+      findWriteWithCommitTS(client_key[c].primary, client_ts[c].commit_ts) = {}
+
 --------------------------------------------------------------------------------
 \* TLAPS proof for proving Spec keeps type invariant.
 LEMMA InitStateSatisfiesTypeInvariant ==
