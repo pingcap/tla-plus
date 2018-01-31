@@ -473,6 +473,7 @@ THEOREM Safety ==
   PercolatorSpec => [](/\ TypeInvariant
                        /\ WriteConsistency
                        /\ LockConsistency
-                       /\ CommittedConsistency)
+                       /\ CommittedConsistency
+                       /\ AbortedConsistency)
 
 ================================================================================
