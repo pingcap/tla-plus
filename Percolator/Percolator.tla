@@ -20,7 +20,9 @@ VARIABLES client_state
 \* $client_ts[c]$ is a record of [start_ts: ts, commit_ts: ts].
 VARIABLES client_ts
 
-\* $client_keys[c]$ is a record of [primary: key, secondary: {key}].
+\* $client_key[c]$ is a record of [primary: key, secondary: {key},
+\* pending: {key}]. Hereby, "pending" denotes the keys that are pending for
+\* prewrite.
 VARIABLES client_key
 
 \* $key_data[k]$ is the set of multi-version data timestamp of the key.
@@ -36,7 +38,9 @@ VARIABLES key_lock
 \* A committed version of the key is a record of [start_ts: ts, commit_ts: ts].
 VARIABLES key_write  \* TODO: Rename to key_rw so we can also log reads?
 
-vars == <<next_ts, client_state, client_ts, client_key, key_data, key_lock, key_write>>
+client_vars == <<client_state, client_ts, client_key>>
+key_vars == <<key_data, key_lock, key_write>>
+vars == <<next_ts, client_vars, key_vars>>
 
 --------------------------------------------------------------------------------
 \* Checks whether there is a lock of key $k$, whose $ts$ is less or equal than
@@ -47,17 +51,6 @@ hasLockLE(k, ts) ==
 \* Checks whether there is a lock of key $k$ with $ts$.
 hasLockEQ(k, ts) ==
   \E l \in key_lock[k] : l.ts = ts
-
-\* Returns TRUE if the client encounters no lock, then can do pre-write.
-canGoPrewrite(c) ==
-  LET
-    start_ts == client_ts[c].start_ts
-    primary == client_key[c].primary
-    secondary == client_key[c].secondary
-  IN
-    /\ ~hasLockLE(primary, start_ts)
-    /\ \A k \in secondary :
-        /\ ~hasLockLE(k, start_ts)
 
 \* Returns TRUE if a lock can be cleanup up.
 \* A lock can be cleaned up iff its ts is less than or equal to $ts$.
@@ -148,26 +141,20 @@ lock(c) ==
     start_ts == client_ts[c].start_ts
     primary == client_key[c].primary
     secondary == client_key[c].secondary
+    pending == client_key[c].pending
   IN
-    IF ~hasLockEQ(primary, start_ts)
+    IF primary \in pending
     THEN  \* primary key is not locked, lock it first.
       /\ canLockKey(primary, start_ts)
       /\ lockKey(primary, start_ts, primary)
+      /\ client_key' = [client_key EXCEPT ![c].pending = @ \ {primary}]
+      /\ UNCHANGED <<client_state, client_ts>>
     ELSE  \* primary key has already been locked, choose a secondary key to lock.
-      \E k \in secondary :
+      \E k \in pending :
         /\ canLockKey(k, start_ts)
         /\ lockKey(k, start_ts, primary)
-
-\* Returns TRUE if the client locks all keys.
-canGoCommit(c) ==
-  LET
-    start_ts == client_ts[c].start_ts
-    primary == client_key[c].primary
-    secondary == client_key[c].secondary
-  IN
-    /\ hasLockEQ(primary, start_ts)
-    /\ \A k \in secondary :
-        /\ hasLockEQ(k, start_ts)
+        /\ client_key' = [client_key EXCEPT ![c].pending = @ \ {k}]
+        /\ UNCHANGED <<client_state, client_ts>>
 
 \* Commits the primary key.
 commitPrimary(c) ==
@@ -186,33 +173,30 @@ Start(c) ==
   /\ next_ts' = next_ts + 1
   /\ client_state' = [client_state EXCEPT ![c] = "working"]
   /\ client_ts' = [client_ts EXCEPT ![c].start_ts = next_ts']
-  /\ UNCHANGED <<key_lock, key_data, key_write, client_key>>
+  /\ UNCHANGED <<key_vars, client_key>>
 
-\* Advances to prewrite phase if no locks, otherwise tries to clean up one stale
-\* lock.
+\* Advances to prewrite phase, or tries to clean up one stale lock if we are
+\* going to read the corresponding key.
 Get(c) ==
   /\ client_state[c] = "working"
-  /\ IF canGoPrewrite(c)
-       THEN
-         /\ client_state' = [client_state EXCEPT ![c] = "prewriting"]
-         /\ UNCHANGED <<next_ts, key_lock, key_data, key_write, client_ts, client_key>>
-       ELSE
-         /\ cleanup(c)
-         /\ UNCHANGED <<next_ts, client_state, client_ts, client_key>>
+  /\ \/ /\ client_state' = [client_state EXCEPT ![c] = "prewriting"]
+        /\ UNCHANGED <<next_ts, key_vars, client_ts, client_key>>
+     \/ /\ cleanup(c)
+        /\ UNCHANGED <<next_ts, client_vars>>
 
 \* Enters commit phase if all locks are granted, otherwise tries to lock the
 \* primary lock and secondary locks.
 Prewrite(c) ==
   /\ client_state[c] = "prewriting"
-  /\ IF canGoCommit(c)
-       THEN
+  /\ IF client_key[c].pending = {}
+       THEN  \* all keys have been pre-written
          /\ next_ts' = next_ts + 1
          /\ client_state' = [client_state EXCEPT ![c] = "committing"]
          /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = next_ts']
-         /\ UNCHANGED <<key_lock, key_data, key_write, client_key>>
+         /\ UNCHANGED <<key_vars, client_key>>
        ELSE
          /\ lock(c)
-         /\ UNCHANGED <<next_ts, client_state, client_ts, client_key>>
+         /\ UNCHANGED <<next_ts>>
 
 \* If we commit the primary key successfully, we can think the transaction is
 \* committed.
@@ -228,7 +212,7 @@ Commit(c) ==
 Abort(c) ==
   /\ client_state[c] # "committed"
   /\ client_state' = [client_state EXCEPT ![c] = "aborted"]
-  /\ UNCHANGED <<next_ts, client_ts, client_key, key_lock, key_data, key_write>>
+  /\ UNCHANGED <<next_ts, client_ts, client_key, key_vars>>
 
 ClientOp(c) ==
   \/ Start(c)
@@ -246,7 +230,9 @@ Init ==
     LET
       primary == CHOOSE k \in ks : TRUE
     IN
-      [primary |-> primary, secondary |-> ks \ {primary}]
+      [primary |-> primary,
+       secondary |-> ks \ {primary},
+       pending |-> ks]
   IN
     /\ next_ts = 0
     /\ client_state = [c \in CLIENT |-> "init"]
@@ -270,7 +256,9 @@ ClientTsTypeInv ==
   client_ts \in [CLIENT -> [start_ts : Nat, commit_ts : Nat]]
 
 ClientKeyTypeInv ==
-  client_key \in [CLIENT -> [primary : KEY, secondary: SUBSET KEY]]
+  client_key \in [CLIENT -> [primary : KEY,
+                             secondary : SUBSET KEY,
+                             pending : SUBSET KEY]]
 
 KeyDataTypeInv ==
   key_data \in [KEY -> SUBSET Nat]
@@ -279,7 +267,7 @@ KeyLockTypeInv ==
   key_lock \in [KEY -> SUBSET [ts : Nat, primary : KEY]]
 
 KeyWriteTypeInv ==
-  key_write \in [KEY -> Seq([start_ts: Nat, commit_ts: Nat])]
+  key_write \in [KEY -> Seq([start_ts : Nat, commit_ts : Nat])]
 
 TypeInvariant ==
   /\ NextTsTypeInv
@@ -385,6 +373,7 @@ LEMMA NextKeepsTypeInvariant ==
 PROOF
 <1> SUFFICES ASSUME TypeInvariant, Next PROVE TypeInvariant' OBVIOUS
 <1> USE DEF TypeInvariant
+<1> USE DEF client_vars, key_vars
 <1> PICK c \in CLIENT : ClientOp(c) BY DEF Next
 <1>a CASE Start(c)
   <2> USE DEF Start
@@ -413,11 +402,7 @@ PROOF
          BY <3>a, findWriteWithStartTSTypeInv
          DEF ClientTsTypeInv, ClientKeyTypeInv, KeyWriteTypeInv,
              KeyLockTypeInv, KeyDataTypeInv, cleanupStaleLock
-    <3>b CASE canGoPrewrite(c) = TRUE
-         BY <1>b, <3>b DEF KeyWriteTypeInv
-    <3>c CASE canGoPrewrite(c) = FALSE
-         BY <1>b, <3>a, <3>c DEF KeyWriteTypeInv, ClientKeyTypeInv, ClientTsTypeInv
-    <3> QED BY <3>b, <3>c
+    <3> QED BY <1>b, <3>a DEF KeyWriteTypeInv, ClientKeyTypeInv, ClientTsTypeInv
   <2> QED BY <2>a, <2>b, <2>c, <2>d, <2>e, <2>f, <2>g
 <1>c CASE Prewrite(c)
   <2> USE DEF Prewrite, lock, lockKey
@@ -431,19 +416,31 @@ PROOF
   <2>c ClientTsTypeInv'
        BY <1>c, <2>a DEF ClientTsTypeInv, NextTsTypeInv
   <2>d ClientKeyTypeInv'
-       BY <1>c DEF ClientKeyTypeInv
+    <3>a CASE client_key[c].pending = {}
+         BY <1>c, <3>a DEF ClientKeyTypeInv
+    <3>b CASE client_key[c].pending # {}
+      <4>a \E k \in KEY :
+             client_key' = [client_key EXCEPT ![c].pending = @ \ {k}]
+           BY <1>c, <3>b DEF ClientKeyTypeInv
+      <4>b PICK k \in KEY : client_key' = [client_key EXCEPT ![c].pending = @ \ {k}]
+           BY <4>a
+      <4> QED BY <4>b DEF ClientKeyTypeInv
+    <3> QED BY <3>a, <3>b
   <2>e KeyDataTypeInv'
-    <3>a CASE canGoCommit(c) = TRUE
+    <3>a CASE client_key[c].pending = {}
          BY <1>c, <3>a DEF KeyDataTypeInv
-    <3>b CASE canGoCommit(c) = FALSE
-         BY <1>c, <3>b DEF KeyDataTypeInv, ClientKeyTypeInv, ClientTsTypeInv
+    <3>b CASE client_key[c].pending # {}
+      <4>a \E k \in KEY : \E ts \in Nat :
+             key_data' = [key_data EXCEPT ![k] = @ \cup {ts}]
+           BY <1>c, <3>b DEF KeyDataTypeInv, ClientKeyTypeInv, ClientTsTypeInv
+      <4> QED BY <4>a DEF KeyDataTypeInv
     <3> QED BY <3>a, <3>b
   <2>f KeyLockTypeInv'
-    <3>a CASE canGoCommit(c) = TRUE
+    <3>a CASE client_key[c].pending = {}
          BY <1>c, <3>a DEF KeyLockTypeInv
-    <3>b CASE canGoCommit(c) = FALSE
+    <3>b CASE client_key[c].pending # {}
       <4>a \E k \in KEY : \E l \in [ts : Nat, primary : KEY] :
-             key_lock' = [key_lock EXCEPT ![k] = key_lock[k] \cup {l}]
+             key_lock' = [key_lock EXCEPT ![k] = @ \cup {l}]
            BY <1>c, <3>b DEF KeyLockTypeInv, ClientKeyTypeInv, ClientTsTypeInv
       <4> QED BY <4>a DEF KeyLockTypeInv
     <3> QED BY <3>a, <3>b
