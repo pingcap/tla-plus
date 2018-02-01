@@ -279,16 +279,13 @@ TypeInvariant ==
   /\ KeyWriteTypeInv
 
 --------------------------------------------------------------------------------
-checkWriteOrder(w1, w2) ==
-  /\ w1.commit_ts < w2.commit_ts
-  /\ w1.start_ts < w2.start_ts
-
-\* The committed write timestamp of the key must be in order, and for each
-\* write, the commit_ts should be strictly greater than start_ts.
+\* The committed write timestamp of one key must be in order, and no two writes
+\* can overlap. For each write, the commit_ts should be strictly greater than
+\* start_ts.
 WriteConsistency ==
   /\ \A k \in KEY :
        \A n \in 1..Len(key_write[k]) - 1 :
-         checkWriteOrder(key_write[k][n], key_write[k][n + 1])
+         key_write[k][n].commit_ts < key_write[k][n + 1].start_ts
   /\ \A k \in KEY :
        \A n \in 1..Len(key_write[k]) :
          key_write[k][n].start_ts < key_write[k][n].commit_ts
