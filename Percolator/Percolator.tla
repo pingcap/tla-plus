@@ -209,8 +209,10 @@ Start(c) ==
   /\ client_ts' = [client_ts EXCEPT ![c].start_ts = next_ts']
   /\ UNCHANGED <<key_vars, client_key>>
 
-\* Advances to prewrite phase, or tries to clean up one stale lock if we are
-\* going to read the corresponding key.
+\* Does either one thing from these following threes.
+\*  1. Advances to prewrite phase,
+\*  2. Tries to clean up one stale lock,
+\*  3. Reads one key if no stale lock.
 Get(c) ==
   /\ client_state[c] = "working"
   /\ \/ /\ client_state' = [client_state EXCEPT ![c] = "prewriting"]
