@@ -41,12 +41,12 @@ VARIABLES key_write
 \* Two auxiliary variables for verifying snapshot isolation invariant.
 \* $key_last_read_ts[k]$ denotes the last read timestamp for key $k$, this
 \* should be monotonic.
-\* $key_SI[k]$ denotes the if the snapshot isolation invariant is preserved for
+\* $key_si[k]$ denotes the if the snapshot isolation invariant is preserved for
 \* key $k$ so far.
-VARIABLES key_last_read_ts, key_SI
+VARIABLES key_last_read_ts, key_si
 
 client_vars == <<client_state, client_ts, client_key>>
-key_vars == <<key_data, key_lock, key_write, key_last_read_ts, key_SI>>
+key_vars == <<key_data, key_lock, key_write, key_last_read_ts, key_si>>
 vars == <<next_ts, client_vars, key_vars>>
 
 --------------------------------------------------------------------------------
@@ -76,15 +76,15 @@ findWriteWithStartTS(k, ts) ==
 findWriteWithCommitTS(k, ts) ==
   {key_write[k][w] : w \in {w \in DOMAIN key_write[k] : key_write[k][w].commit_ts = ts}}
 
-\* Updates $key_SI$ for key $k$. If a new version of key $k$ is committed with
+\* Updates $key_si$ for key $k$. If a new version of key $k$ is committed with
 \* $commit_ts$ < last read timestamp, consider the snapshot isolation invariant
 \* for key $k$ has been violated.
 checkSnapshotIsolation(k, commit_ts) ==
   IF key_last_read_ts[k] >= commit_ts
   THEN
-    key_SI' = [key_SI EXCEPT ![k] = FALSE]
+    key_si' = [key_si EXCEPT ![k] = FALSE]
   ELSE
-    UNCHANGED <<key_SI>>
+    UNCHANGED <<key_si>>
 
 \* Cleans up a stale lock and its data.
 \* If the lock is a secondary lock, and the assoicated primary lock is cleaned
@@ -94,12 +94,12 @@ checkSnapshotIsolation(k, commit_ts) ==
 cleanupStaleLock(k, ts) ==
   \E l \in key_lock[k] :
     /\ isStaleLock(k, l, ts)
-    /\ UNCHANGED <<key_last_read_ts, key_SI>>
+    /\ UNCHANGED <<key_last_read_ts>>
     /\ \/ /\ l.primary = k  \* this is a primary key, always rollback
                             \* because it is not committed.
           /\ key_data' = [key_data EXCEPT ![k] = @ \ {l.ts}]
           /\ key_lock' = [key_lock EXCEPT ![k] = @ \ {l}]
-          /\ UNCHANGED <<key_write>>
+          /\ UNCHANGED <<key_write, key_si>>
        \/ /\ l.primary # k  \* this is a secondary key.
           /\ LET
                 ws == findWriteWithStartTS(l.primary, l.ts)
@@ -113,11 +113,11 @@ cleanupStaleLock(k, ts) ==
                   THEN
                     /\ key_data' = [key_data EXCEPT ![l.primary] = @ \ {l.ts}]
                     /\ key_lock' = [key_lock EXCEPT ![l.primary] = @ \ {l}]
-                    /\ UNCHANGED <<key_write>>
+                    /\ UNCHANGED <<key_write, key_si>>
                   ELSE
                     /\ key_data' = [key_data EXCEPT ![k] = @ \ {l.ts}]
                     /\ key_lock' = [key_lock EXCEPT ![k] = @ \ {l}]
-                    /\ UNCHANGED <<key_write>>
+                    /\ UNCHANGED <<key_write, key_si>>
                 ELSE
                   \* the primary key is committed, commit the secondary key.
                   \E w \in ws :
@@ -150,7 +150,7 @@ readKey(c) ==
       /\ ~hasStaleLock(k, start_ts)
       /\ key_last_read_ts[k] < start_ts
       /\ key_last_read_ts' = [key_last_read_ts EXCEPT ![k] = start_ts]
-      /\ UNCHANGED <<key_data, key_lock, key_write, key_SI>>
+      /\ UNCHANGED <<key_data, key_lock, key_write, key_si>>
 
 \* Returns TRUE if there is no lock for key $k$, and no any newer write than
 \* $ts$.
@@ -165,7 +165,7 @@ canLockKey(k, ts) ==
 lockKey(k, start_ts, primary) ==
   /\ key_lock' = [key_lock EXCEPT ![k] = @ \union {[ts |-> start_ts, primary |-> primary]}]
   /\ key_data' = [key_data EXCEPT ![k] = @ \union {start_ts}]
-  /\ UNCHANGED <<key_write, key_last_read_ts, key_SI>>
+  /\ UNCHANGED <<key_write, key_last_read_ts, key_si>>
 
 \* Tries to lock primary key first, then the secondary key.
 lock(c) ==
@@ -280,7 +280,7 @@ Init ==
     /\ key_data = [k \in KEY |-> {}]
     /\ key_write = [k \in KEY |-> <<>>]
     /\ key_last_read_ts = [k \in KEY |-> 0]
-    /\ key_SI = [k \in KEY |-> TRUE]
+    /\ key_si = [k \in KEY |-> TRUE]
 
 PercolatorSpec == Init /\ [][Next]_vars
 
@@ -309,6 +309,12 @@ KeyLockTypeInv ==
 KeyWriteTypeInv ==
   key_write \in [KEY -> Seq([start_ts : Nat, commit_ts : Nat])]
 
+KeyLastReadTsTypeInv ==
+  key_last_read_ts \in [KEY -> Nat]
+
+KeySiTypeInv ==
+  key_si \in [KEY -> BOOLEAN]
+
 TypeInvariant ==
   /\ NextTsTypeInv
   /\ ClientStateTypeInv
@@ -317,6 +323,8 @@ TypeInvariant ==
   /\ KeyDataTypeInv
   /\ KeyLockTypeInv
   /\ KeyWriteTypeInv
+  /\ KeyLastReadTsTypeInv
+  /\ KeySiTypeInv
 
 --------------------------------------------------------------------------------
 \* The committed write timestamp of one key must be in order, and no two writes
@@ -381,7 +389,7 @@ AbortedConsistency ==
 \* Snapshot isolation invariant should be preserved.
 SnapshotIsolation ==
   \A k \in KEY :
-    key_SI[k] = TRUE
+    key_si[k] = TRUE
 
 --------------------------------------------------------------------------------
 \* TLAPS proof for proving Spec keeps type invariant.
@@ -390,7 +398,8 @@ LEMMA InitStateSatisfiesTypeInvariant ==
 PROOF
 <1> USE DEF Init, TypeInvariant
 <1> USE DEF NextTsTypeInv, ClientStateTypeInv, ClientTsTypeInv, ClientKeyTypeInv,
-            KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv
+            KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv,
+            KeyLastReadTsTypeInv, KeySiTypeInv
 <1> QED BY SMT, KeyNotEmpty
 
 LEMMA findWriteWithStartTSTypeInv ==
@@ -420,7 +429,8 @@ PROOF
 <1>a CASE Start(c)
   <2> USE DEF Start
   <2> USE DEF NextTsTypeInv, ClientStateTypeInv, ClientTsTypeInv, ClientKeyTypeInv,
-              KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv
+              KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv,
+              KeyLastReadTsTypeInv, KeySiTypeInv
   <2> QED BY <1>a
 <1>b CASE Get(c)
   <2> USE DEF Get, cleanup, readKey
@@ -445,7 +455,14 @@ PROOF
          DEF ClientTsTypeInv, ClientKeyTypeInv, KeyWriteTypeInv,
              KeyLockTypeInv, KeyDataTypeInv, cleanupStaleLock
     <3> QED BY <1>b, <3>a DEF KeyWriteTypeInv, ClientKeyTypeInv, ClientTsTypeInv
-  <2> QED BY <2>a, <2>b, <2>c, <2>d, <2>e, <2>f, <2>g
+  <2>h KeyLastReadTsTypeInv'
+    <3>a ASSUME readKey(c)
+         PROVE KeyLastReadTsTypeInv'
+         BY <3>a DEF KeyLastReadTsTypeInv, ClientKeyTypeInv, ClientTsTypeInv
+    <3> QED BY <1>b, <3>a DEF KeyLastReadTsTypeInv, cleanupStaleLock
+  <2>i KeySiTypeInv'
+       BY <1>b DEF KeySiTypeInv, cleanupStaleLock, checkSnapshotIsolation
+  <2> QED BY <2>a, <2>b, <2>c, <2>d, <2>e, <2>f, <2>g, <2>h, <2>i
 <1>c CASE Prewrite(c)
   <2> USE DEF Prewrite, lock, lockKey
   <2>a NextTsTypeInv'
@@ -488,16 +505,22 @@ PROOF
     <3> QED BY <3>a, <3>b
   <2>g KeyWriteTypeInv'
        BY <1>c DEF KeyWriteTypeInv
-  <2> QED BY <2>a, <2>b, <2>c, <2>d, <2>e, <2>f, <2>g
+  <2>h KeyLastReadTsTypeInv'
+       BY <1>c DEF KeyLastReadTsTypeInv
+  <2>i KeySiTypeInv'
+       BY <1>c DEF KeySiTypeInv
+  <2> QED BY <2>a, <2>b, <2>c, <2>d, <2>e, <2>f, <2>g, <2>h, <2>i
 <1>d CASE Commit(c)
-  <2> USE DEF Commit, commitPrimary, lock, lockKey
+  <2> USE DEF Commit, commitPrimary, lock, lockKey, checkSnapshotIsolation
   <2> USE DEF NextTsTypeInv, ClientStateTypeInv, ClientTsTypeInv, ClientKeyTypeInv,
-              KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv
+              KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv,
+              KeyLastReadTsTypeInv, KeySiTypeInv
   <2> QED BY <1>d
 <1>e CASE Abort(c)
   <2> USE DEF Abort
   <2> USE DEF NextTsTypeInv, ClientStateTypeInv, ClientTsTypeInv, ClientKeyTypeInv,
-              KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv
+              KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv,
+              KeyLastReadTsTypeInv, KeySiTypeInv
   <2> QED BY <1>e
 <1> QED BY <1>a, <1>b, <1>c, <1>d, <1>e DEF ClientOp
 
