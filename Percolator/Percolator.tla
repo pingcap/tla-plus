@@ -36,10 +36,17 @@ VARIABLES key_lock
 
 \* $key_write[k]$ is a sequence of committed version of the key.
 \* A committed version of the key is a record of [start_ts: ts, commit_ts: ts].
-VARIABLES key_write  \* TODO: Rename to key_rw so we can also log reads?
+VARIABLES key_write
+
+\* Two auxiliary variables for verifying snapshot isolation invariant.
+\* $key_last_read_ts[k]$ denotes the last read timestamp for key $k$, this
+\* should be monotonic.
+\* $key_SI[k]$ denotes the if the snapshot isolation invariant is preserved for
+\* key $k$ so far.
+VARIABLES key_last_read_ts, key_SI
 
 client_vars == <<client_state, client_ts, client_key>>
-key_vars == <<key_data, key_lock, key_write>>
+key_vars == <<key_data, key_lock, key_write, key_last_read_ts, key_SI>>
 vars == <<next_ts, client_vars, key_vars>>
 
 --------------------------------------------------------------------------------
@@ -69,6 +76,16 @@ findWriteWithStartTS(k, ts) ==
 findWriteWithCommitTS(k, ts) ==
   {key_write[k][w] : w \in {w \in DOMAIN key_write[k] : key_write[k][w].commit_ts = ts}}
 
+\* Updates $key_SI$ for key $k$. If a new version of key $k$ is committed with
+\* $commit_ts$ < last read timestamp, consider the snapshot isolation invariant
+\* for key $k$ has been violated.
+checkSnapshotIsolation(k, commit_ts) ==
+  IF key_last_read_ts[k] >= commit_ts
+  THEN
+    key_SI' = [key_SI EXCEPT ![k] = FALSE]
+  ELSE
+    UNCHANGED <<key_SI>>
+
 \* Cleans up a stale lock and its data.
 \* If the lock is a secondary lock, and the assoicated primary lock is cleaned
 \* up, we can clean up the lock and do,
@@ -77,6 +94,7 @@ findWriteWithCommitTS(k, ts) ==
 cleanupStaleLock(k, ts) ==
   \E l \in key_lock[k] :
     /\ isStaleLock(k, l, ts)
+    /\ UNCHANGED <<key_last_read_ts, key_SI>>
     /\ \/ /\ l.primary = k  \* this is a primary key, always rollback
                             \* because it is not committed.
           /\ key_data' = [key_data EXCEPT ![k] = @ \ {l.ts}]
@@ -105,6 +123,7 @@ cleanupStaleLock(k, ts) ==
                   \E w \in ws :
                     /\ key_lock' = [key_lock EXCEPT ![k] = @ \ {l}]
                     /\ key_write' = [key_write EXCEPT ![k] = Append(@, w)]
+                    /\ checkSnapshotIsolation(k, w.commit_ts)
                     /\ UNCHANGED <<key_data>>
 
 \* Cleans up a stale lock when the client encounters one.
@@ -120,6 +139,19 @@ cleanup(c) ==
          /\ hasStaleLock(k, start_ts)
          /\ cleanupStaleLock(k, start_ts)
 
+\* Reads one key if there is no stale lock, and updates last read timestamp.
+readKey(c) ==
+  LET
+    start_ts == client_ts[c].start_ts
+    primary == client_key[c].primary
+    secondary == client_key[c].secondary
+  IN
+    \E k \in {primary} \union secondary :
+      /\ ~hasStaleLock(k, start_ts)
+      /\ key_last_read_ts[k] < start_ts
+      /\ key_last_read_ts' = [key_last_read_ts EXCEPT ![k] = start_ts]
+      /\ UNCHANGED <<key_data, key_lock, key_write, key_SI>>
+
 \* Returns TRUE if there is no lock for key $k$, and no any newer write than
 \* $ts$.
 canLockKey(k, ts) ==
@@ -133,7 +165,7 @@ canLockKey(k, ts) ==
 lockKey(k, start_ts, primary) ==
   /\ key_lock' = [key_lock EXCEPT ![k] = @ \union {[ts |-> start_ts, primary |-> primary]}]
   /\ key_data' = [key_data EXCEPT ![k] = @ \union {start_ts}]
-  /\ UNCHANGED <<key_write>>
+  /\ UNCHANGED <<key_write, key_last_read_ts, key_SI>>
 
 \* Tries to lock primary key first, then the secondary key.
 lock(c) ==
@@ -160,12 +192,14 @@ lock(c) ==
 commitPrimary(c) ==
   LET
     start_ts == client_ts[c].start_ts
+    commit_ts == client_ts[c].commit_ts
     primary == client_key[c].primary
   IN
     /\ hasLockEQ(primary, start_ts)
-    /\ key_write' = [key_write EXCEPT ![primary] = Append(@, client_ts[c])]
     /\ key_lock' = [key_lock EXCEPT ![primary] = @ \ {[ts |-> start_ts, primary |-> primary]}]
-    /\ UNCHANGED <<key_data>>
+    /\ key_write' = [key_write EXCEPT ![primary] = Append(@, client_ts[c])]
+    /\ checkSnapshotIsolation(primary, commit_ts)
+    /\ UNCHANGED <<key_data, key_last_read_ts>>
 
 \* Assigns $start_ts$ to the transaction.
 Start(c) ==
@@ -182,6 +216,8 @@ Get(c) ==
   /\ \/ /\ client_state' = [client_state EXCEPT ![c] = "prewriting"]
         /\ UNCHANGED <<next_ts, key_vars, client_ts, client_key>>
      \/ /\ cleanup(c)
+        /\ UNCHANGED <<next_ts, client_vars>>
+     \/ /\ readKey(c)
         /\ UNCHANGED <<next_ts, client_vars>>
 
 \* Enters commit phase if all locks are granted, otherwise tries to lock the
@@ -239,8 +275,10 @@ Init ==
     /\ client_ts = [c \in CLIENT |-> [start_ts |-> 0, commit_ts |-> 0]]
     /\ client_key = [c \in CLIENT |-> chooseKey(KEY)]
     /\ key_lock = [k \in KEY |-> {}]
-    /\ key_write = [k \in KEY |-> <<>>]
     /\ key_data = [k \in KEY |-> {}]
+    /\ key_write = [k \in KEY |-> <<>>]
+    /\ key_last_read_ts = [k \in KEY |-> 0]
+    /\ key_SI = [k \in KEY |-> TRUE]
 
 PercolatorSpec == Init /\ [][Next]_vars
 
@@ -338,6 +376,11 @@ AbortedConsistency ==
     ) =>
       findWriteWithCommitTS(client_key[c].primary, client_ts[c].commit_ts) = {}
 
+\* Snapshot isolation invariant should be preserved.
+SnapshotIsolation ==
+  \A k \in KEY :
+    key_SI[k] = TRUE
+
 --------------------------------------------------------------------------------
 \* TLAPS proof for proving Spec keeps type invariant.
 LEMMA InitStateSatisfiesTypeInvariant ==
@@ -378,7 +421,7 @@ PROOF
               KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv
   <2> QED BY <1>a
 <1>b CASE Get(c)
-  <2> USE DEF Get, cleanup
+  <2> USE DEF Get, cleanup, readKey
   <2>a NextTsTypeInv'
        BY <1>b DEF NextTsTypeInv
   <2>b ClientStateTypeInv'
@@ -468,6 +511,7 @@ THEOREM Safety ==
                        /\ WriteConsistency
                        /\ LockConsistency
                        /\ CommittedConsistency
-                       /\ AbortedConsistency)
+                       /\ AbortedConsistency
+                       /\ SnapshotIsolation)
 
 ================================================================================
