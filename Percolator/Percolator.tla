@@ -196,8 +196,8 @@ commitPrimary(c) ==
     primary == client_key[c].primary
   IN
     /\ hasLockEQ(primary, start_ts)
-    /\ key_lock' = [key_lock EXCEPT ![primary] = @ \ {[ts |-> start_ts, primary |-> primary]}]
     /\ key_write' = [key_write EXCEPT ![primary] = Append(@, client_ts[c])]
+    /\ key_lock' = [key_lock EXCEPT ![primary] = @ \ {[ts |-> start_ts, primary |-> primary]}]
     /\ checkSnapshotIsolation(primary, commit_ts)
     /\ UNCHANGED <<key_data, key_last_read_ts>>
 
