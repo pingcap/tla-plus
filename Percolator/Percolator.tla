@@ -1,6 +1,6 @@
 ------------------------------- MODULE Percolator ------------------------------
 
-EXTENDS Integers, FiniteSets, Sequences, TLAPS
+EXTENDS Integers, FiniteSets, Sequences, TLAPS, TLC
 
 \* The set of transaction keys.
 CONSTANTS KEY
@@ -390,6 +390,10 @@ AbortedConsistency ==
 SnapshotIsolation ==
   \A k \in KEY :
     key_si[k] = TRUE
+
+--------------------------------------------------------------------------------
+\* Used for symmetry reduction with TLC.
+Symmetry == Permutations(CLIENT)
 
 --------------------------------------------------------------------------------
 \* TLAPS proof for proving Spec keeps type invariant.
