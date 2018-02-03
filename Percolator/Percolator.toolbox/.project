@@ -33,7 +33,7 @@
 		<link>
 			<name>TLAPS.tla</name>
 			<type>1</type>
-			<location>/home/foreverbell/Desktop/tla-plus/Percolator/TLAPS.tla</location>
+			<location>/usr/local/lib/tlaps/TLAPS.tla</location>
 		</link>
 	</linkedResources>
 </projectDescription>
