@@ -12,6 +12,8 @@ This directory contains the TLA+ specification of Percolator, the transaction pr
 - Install [TLAPS](https://tla.msr-inria.inria.fr/tlaps/content/Download/Binaries.html).
 - Import the TLA+ toolbox configuration.
 
+Note TLAPS is optional. You can remove all TLAPS proof, it does not affect the model.
+
 ## How to run in command line?
 
 - Download [tla2tools.jar](https://tla.msr-inria.inria.fr/tlatoolbox/dist/tla2tools.jar).
