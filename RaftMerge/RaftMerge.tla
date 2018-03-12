@@ -47,17 +47,11 @@ VARIABLES messages
 \*   int match_index[MAXS];  // leader only
 \* };
 \*
-\* struct Region {
-\*   RegionState state;
-\*   bool epoch_changed;
-\* };
-\*
 \* struct Store {
 \*   Raft raft[2];      // 2 for two regions
 \* } stores[MAXS];
 \*
-\* Note for ease of implementation, we use two 2-dimension arrays raft[MAXS][2]
-\* and region[MAXS][2].
+\* Note for ease of implementation, we use two 2-dimension arrays raft[MAXS][2].
 
 \* Log.
 CONSTANTS Log
@@ -181,11 +175,12 @@ ClientRequest(i, r, log) ==
 
 -------------------------------------------------------------------------------
 
-\* Returns TRUE if there is a log applicable to the state machine.
+\* Return TRUE if there is a log applicable to the state machine.
 LogAppliable(i, r) ==
   raft[i][r].apply_index < raft[i][r].commit_index
 
-\* Applying Raft logs to make apply_index catch up with commit_index.
+\* Apply Raft logs to make apply_index catch up with commit_index.
+\* This simply increases apply_index.
 ApplyLog(i, r) ==
   LET
     next_index == raft[i][r].apply_index + 1
@@ -291,6 +286,7 @@ ApplyIndexInvariant ==
     \A r \in Region :
       raft[s][r].apply_index <= raft[s][r].commit_index
 
+\* Combination of the above invariants.
 SimpliedRaftInvariant ==
   /\ OneLeaderInvariant
   /\ AppendEntriesMessageInvariant
