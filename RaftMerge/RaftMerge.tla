@@ -12,11 +12,12 @@ ASSUME /\ Region = {RegionA, RegionB}
 
 \* The minimum size of servers to be a quorum.
 \*
-\* The motivation of adding this constant is that, raft with 1 leader and 2
+\* The motivation of adding this constant is that, Raft with 1 leader and 2
 \* followers is rather slow for TLC to verify (the space to explore is fricking
-\* big). We relax the raft with only 1 leader and 1 follower. By setting
-\* quorum size to 1 as a backdoor, we can simulate some states that a follower
-\* can have some logs lag behind, but does not affect the correctness of raft
+\* big). We relax Raft with only 1 leader and 1 follower. By setting quorum size
+\* to 1 as a hack, we can simulate some states that a follower can have some
+\* logs lag behind, a scenario which can happen when there are at least 3
+\* servers in a Raft group. This setting does not affect the correctness of Raft
 \* protocol because we assume there is no leader switch.
 \*
 \* If set to 0, a set of servers is considered as a quorum if it contains at
@@ -103,7 +104,7 @@ Reply(reply, request) == messages' = (messages \cup {reply}) \ {request}
 -------------------------------------------------------------------------------
 \* State transitions and message handlers for Raft.
 
-\* Leader i sends j an AppendEntries request containing up to 1 entry.
+\* Leader i of region r sends j an AppendEntries request containing 1 entry.
 AppendEntries(i, j, r) ==
   /\ i /= j
   /\ raft[i][r].is_leader
@@ -120,7 +121,7 @@ AppendEntries(i, j, r) ==
                 commit_index |-> Min({next_index, raft[i][r].commit_index})])
   /\ UNCHANGED <<raft, region, client_vars>>
 
-\* Leader i advances its commitIndex.
+\* Leader i of region r advances its commitIndex.
 AdvanceCommitIndex(i, r) ==
   /\ raft[i][r].is_leader
   /\ LET
@@ -134,7 +135,7 @@ AdvanceCommitIndex(i, r) ==
        raft' = [raft EXCEPT ![i][r].commit_index = new_commit_index]
   /\ UNCHANGED <<messages, region, client_vars>>
 
-\* Server i receives an AppendEntries request from server j.
+\* Server i of region r receives an AppendEntries request from server j.
 HandleAppendEntriesRequest(i, j, r, m) ==
   \/ \* Append this log entry if it is new.
      /\ m.entry_index = Len(raft[i][r].logs) + 1
@@ -156,7 +157,7 @@ HandleAppendEntriesRequest(i, j, r, m) ==
      /\ Discard(m)
      /\ UNCHANGED <<raft, region, client_vars>>
 
-\* Server i receives an AppendEntries reply from server j.
+\* Server i of region r receives an AppendEntries reply from server j.
 HandleAppendEntriesReply(i, j, r, m) ==
   /\ raft' = [raft EXCEPT ![i][r].match_index = [@ EXCEPT ![j] = Max({@, m.match_index})]]
   /\ Discard(m)
@@ -174,7 +175,7 @@ Receive(m) ==
     \/ /\ m.type = AppendEntriesReply
        /\ HandleAppendEntriesReply(i, j, r, m)
 
-\* Leader i receives a client request to add a log.
+\* Leader i of region r receives a client request to append a log.
 ClientRequest(i, r, log) ==
   /\ raft[i][r].is_leader
   /\ region[i][r] = RegionNormal
