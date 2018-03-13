@@ -39,6 +39,10 @@ VARIABLES messages
 
 \* The data structures in C. MAXS = |Store|.
 \*
+\* enum Log { LogNormal, LogPreMerge, LogMerge, LogRollback };
+\*
+\* enum RegionState { RegionNormal, RegionTombStone, RegionMerging };
+\*
 \* struct Raft {
 \*   bool is_leader;
 \*   vector<Log> logs;
@@ -48,13 +52,23 @@ VARIABLES messages
 \* };
 \*
 \* struct Store {
-\*   Raft raft[2];      // 2 for two regions
+\*   Raft raft[2];           // 2 for two regions
+\*   RegionState region[2];  // 2 for two regions
 \* } stores[MAXS];
 \*
-\* Note for ease of implementation, we use two 2-dimension arrays raft[MAXS][2].
+\* Note for ease of implementation, we use two 2-dimension arrays raft[MAXS][2]
+\* and region[MAXS][2].
 
-\* Log.
-CONSTANTS Log
+\* Log types.
+CONSTANTS LogNormal,    \* RegionB only
+          LogPreMerge,
+          LogMerge,
+          LogRollback
+
+\* Region state types.
+CONSTANTS RegionNormal,
+          RegionTombStone,
+          RegionMerging
 
 VARIABLES raft, region
 
@@ -163,6 +177,7 @@ Receive(m) ==
 \* Leader i receives a client request to add a log.
 ClientRequest(i, r, log) ==
   /\ raft[i][r].is_leader
+  /\ region[i][r] = RegionNormal
   /\ client_requests_index < MaxClientRequests
   /\ LET
        new_logs == Append(raft[i][r].logs, log)
@@ -174,20 +189,119 @@ ClientRequest(i, r, log) ==
   /\ UNCHANGED <<messages, region>>
 
 -------------------------------------------------------------------------------
+\* State transitions for Raft merge, and log applying.
+
+\* Internal requests for Raft merge.
+\* Assume raft[i][r].is_leader, i.e., only leader can handle internal requests.
+InternalRequest(i, r, log) ==
+  LET
+    new_logs == Append(raft[i][r].logs, log)
+    new_match_index == [raft[i][r].match_index EXCEPT ![i] = @ + 1]
+  IN
+    [raft EXCEPT ![i][r].logs = new_logs,
+                 ![i][r].match_index = new_match_index]
+
+ProposePreMergeRequest(i, r) ==
+  /\ raft[i][r].is_leader
+  /\ SelectSeq(raft[i][r].logs, LAMBDA log : log.type = LogPreMerge) = << >>
+  /\ raft' = InternalRequest(
+               i, r,
+               [type      |-> LogPreMerge,
+                min_index |-> 1 + Min({raft[i][r].match_index[j] : j \in Store})]
+             )
+  /\ UNCHANGED <<messages, region, client_vars>>
 
 \* Return TRUE if there is a log applicable to the state machine.
+\* A log is applicable if it is committed, and the target region is not in
+\* TombStone state.
 LogAppliable(i, r) ==
-  raft[i][r].apply_index < raft[i][r].commit_index
+  /\ raft[i][r].apply_index < raft[i][r].commit_index
+  /\ region[i][r] /= RegionTombStone
 
-\* Apply Raft logs to make apply_index catch up with commit_index.
-\* This simply increases apply_index.
-ApplyLog(i, r) ==
+\* Apply LogPreMerge.
+ApplyPreMergeLog(i) ==
+  LET
+    next_index == raft[i][RegionB].apply_index + 1
+  IN
+    /\ LogAppliable(i, RegionB)
+    /\ raft[i][RegionB].logs[next_index].type = LogPreMerge
+    /\ IF raft[i][RegionA].is_leader
+       THEN
+         \* If this store is the leader of regionA, make a merge proposal, and
+         \* advance apply_index.
+         LET
+           min_index == raft[i][RegionB].logs[next_index].min_index
+           commit_index == next_index
+           fetch_logs == SubSeq(raft[i][RegionB].logs, min_index, commit_index)
+         IN
+           raft' = [InternalRequest(
+                      i, RegionA,
+                      [type         |-> LogMerge,
+                       min_index    |-> min_index,
+                       commit_index |-> commit_index,
+                       entries      |-> fetch_logs]
+                    )
+                    EXCEPT ![i][RegionB].apply_index = next_index]
+       ELSE
+         \* Otherwise, only advance apply_index.
+         raft' = [raft EXCEPT ![i][RegionB].apply_index = next_index]
+    /\ region' = [region EXCEPT ![i][RegionB] = RegionMerging]
+    /\ UNCHANGED <<messages, client_vars>>
+
+\* Apply LogMerge.
+\*
+\* This action is roughly divided into two sub-actions, and executed separately.
+\* The first step copys the logs to region B, to ensure it in sync with leader
+\* B. The second step waits until the copied logs in the first step are applied,
+\* then advances apply_index and marks this region as tombstone.
+ApplyMergeLogStep1(i) ==
+  LET
+    next_index   == raft[i][RegionA].apply_index + 1
+    min_index    == raft[i][RegionA].logs[next_index].min_index
+    commit_index == raft[i][RegionA].logs[next_index].commit_index
+    new_logs     == SubSeq(raft[i][RegionB].logs, 1, min_index - 1)
+                    \o raft[i][RegionA].logs[next_index].entries
+                    \o SubSeq(raft[i][RegionB].logs, commit_index + 1, Len(raft[i][RegionB].logs))
+  IN
+    /\ raft' = [raft EXCEPT ![i][RegionB].logs = new_logs,
+                            ![i][RegionB].commit_index = Max({@, commit_index})]
+    /\ UNCHANGED <<messages, region, client_vars>>
+
+ApplyMergeLogStep2(i) ==
+  LET
+    next_index   == raft[i][RegionA].apply_index + 1
+    commit_index == raft[i][RegionA].logs[next_index].commit_index
+  IN
+    /\ raft[i][RegionB].apply_index = commit_index
+    /\ raft' = [raft EXCEPT ![i][RegionA].apply_index = next_index]
+    /\ region' = [region EXCEPT ![i][RegionB] = RegionTombStone]
+    /\ UNCHANGED <<messages, client_vars>>
+
+ApplyMergeLog(i) ==
+  LET
+    next_index == raft[i][RegionA].apply_index + 1
+  IN
+    /\ LogAppliable(i, RegionA)
+    /\ raft[i][RegionA].logs[next_index].type = LogMerge
+    /\ \/ ApplyMergeLogStep1(i)
+       \/ ApplyMergeLogStep2(i)
+
+\* Apply LogNormal.
+\* This log simply increases apply_index.
+ApplyNormalLog(i, r) ==
   LET
     next_index == raft[i][r].apply_index + 1
   IN
     /\ LogAppliable(i, r)
+    /\ raft[i][r].logs[next_index].type = LogNormal
     /\ raft' = [raft EXCEPT ![i][r].apply_index = next_index]
     /\ UNCHANGED <<messages, region, client_vars>>
+
+\* Apply Raft logs to make apply_index catch up with commit_index.
+ApplyLog(i) ==
+  \/ \E r \in Region : ApplyNormalLog(i, r)
+  \/ ApplyPreMergeLog(i)
+  \/ ApplyMergeLog(i)
 
 -------------------------------------------------------------------------------
 
@@ -197,11 +311,14 @@ Next ==
   \/ \E i,j \in Store : \E r \in Region : AppendEntries(i, j, r)
   \/ \E i \in Store : \E r \in Region : AdvanceCommitIndex(i, r)
   \/ \E m \in messages : Receive(m)
-  \/ \E i \in Store : \E r \in Region : ApplyLog(i, r)
 
-  \* External client can send requests to region leader.
-  \/ \E i \in Store : \E r \in Region :
-        ClientRequest(i, r, Log)
+  \* External client can send requests to region B leader, to add a new log
+  \* entry in region B.
+  \/ \E i \in Store : ClientRequest(i, RegionB, [type |-> LogNormal])
+
+  \* Raft merge actions.
+  \/ ProposePreMergeRequest(LeaderB, RegionB)
+  \/ \E i \in Store : ApplyLog(i)
 
 Init ==
   /\ messages = {}
@@ -222,7 +339,7 @@ Init ==
        raft = MarkLeader(MarkLeader(no_leader_raft, LeaderA, RegionA),
                          LeaderB,
                          RegionB)
-  /\ region = TRUE
+  /\ region = [i \in Store |-> [r \in Region |-> RegionNormal]]
   /\ client_requests_index = 0
 
 Spec ==
@@ -232,7 +349,17 @@ Spec ==
 \* Type invariants.
 
 LogType ==
-  {Log}
+  LET
+    FlatLogType ==
+           [type : {LogNormal}]
+      \cup [type : {LogPreMerge}, min_index : Nat]
+      \cup [type : {LogRollback}, commit_index : Nat]
+  IN
+         FlatLogType
+    \cup [type : {LogMerge},
+          min_index : Nat,
+          commit_index : Nat,
+          entries : Seq(FlatLogType)]
 
 RaftType ==
   [ is_leader    : BOOLEAN,
@@ -243,8 +370,12 @@ RaftType ==
                                    \* Initialized to zeroes on followers.
   ]
 
+RegionType ==
+  { RegionNormal, RegionTombStone, RegionMerging }
+
 TypeInvariant ==
   /\ raft   \in [Store -> [Region -> RaftType]]
+  /\ region \in [Store -> [Region -> RegionType]]
 
 -------------------------------------------------------------------------------
 \* Some invariants for our simplified Raft model.
@@ -292,5 +423,20 @@ SimpliedRaftInvariant ==
   /\ AppendEntriesMessageInvariant
   /\ LogInvariant
   /\ ApplyIndexInvariant
+
+-------------------------------------------------------------------------------
+
+RegionApplyInvariant ==
+  \A i,j \in Store :
+    (
+      /\ i /= j
+      /\ (\A r \in Region : raft[i][r].apply_index = raft[j][r].apply_index)
+    ) =>
+      \A r \in Region : region[i][r] = region[j][r]
+
+MergeSafety ==
+  \A i \in Store :
+    region[i][RegionB] = RegionTombStone =>
+      raft[i][RegionB].logs[raft[i][RegionB].apply_index].type = LogPreMerge
 
 ===============================================================================
