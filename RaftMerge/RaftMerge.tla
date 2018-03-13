@@ -448,7 +448,7 @@ SimpliedRaftInvariant ==
 \* If a region on two different stores have applied the same logs, they should
 \* also share the same region state.
 RegionApplyInvariant ==
-  \A i,j \in Store :
+  \A i, j \in Store :
     (
       /\ i /= j
       /\ (\A r \in Region : raft[i][r].apply_index = raft[j][r].apply_index)
@@ -465,7 +465,7 @@ MergeLastLogInvariant ==
 \* For any two stores of region B, if both done, their applied logs should be
 \* same.
 MergeLogInvariant ==
-  \A i,j \in Store :
+  \A i, j \in Store :
     (
       /\ i /= j
       /\ region[i][RegionB] = RegionTombStone
