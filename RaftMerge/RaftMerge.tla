@@ -57,7 +57,7 @@ VARIABLES messages
 
 \* The data structures in C. MAXS = |Store|.
 \*
-\* enum Log { LogNormal, LogPreMerge, LogMerge, LogRollback };
+\* enum Log { LogNormal, LogPreMerge, LogMerge };
 \*
 \* enum RegionState { RegionNormal, RegionTombStone, RegionMerging };
 \*
@@ -80,8 +80,7 @@ VARIABLES messages
 \* Log types.
 CONSTANTS LogNormal,    \* RegionB only
           LogPreMerge,
-          LogMerge,
-          LogRollback
+          LogMerge
 
 \* Region state types.
 CONSTANTS RegionNormal,
@@ -373,7 +372,6 @@ LogType ==
     FlatLogType ==
            [type : {LogNormal}]
       \cup [type : {LogPreMerge}, min_index : Nat]
-      \cup [type : {LogRollback}, commit_index : Nat]
   IN
          FlatLogType
     \cup [type : {LogMerge},
