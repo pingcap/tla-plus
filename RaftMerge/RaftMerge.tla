@@ -245,7 +245,7 @@ RaftType ==
   ]
 
 TypeInvariant ==
-  /\ raft   \in [Store -> [Region -> RaftType]]
+  /\ raft \in [Store -> [Region -> RaftType]]
 
 -------------------------------------------------------------------------------
 \* Some invariants for our simplified Raft model.
