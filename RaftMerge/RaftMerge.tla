@@ -1,5 +1,7 @@
 ------------------------------ MODULE RaftMerge -------------------------------
 
+\* TODO: Add some overall descriptions here.
+
 EXTENDS Integers, FiniteSets, Sequences, TLC
 
 CONSTANTS Store, Region
@@ -428,7 +430,10 @@ SimpliedRaftInvariant ==
   /\ ApplyIndexInvariant
 
 -------------------------------------------------------------------------------
+\* Some invariants for Raft region merge.
 
+\* If a region on two different stores have applied the same logs, they should
+\* also share the same region state.
 RegionApplyInvariant ==
   \A i,j \in Store :
     (
@@ -437,9 +442,35 @@ RegionApplyInvariant ==
     ) =>
       \A r \in Region : region[i][r] = region[j][r]
 
-MergeSafety ==
+\* After Raft merge is done, the last applied log of region B should be
+\* LogPreMerge.
+MergeLastLogInvariant ==
   \A i \in Store :
     region[i][RegionB] = RegionTombStone =>
       raft[i][RegionB].logs[raft[i][RegionB].apply_index].type = LogPreMerge
+
+\* For any two stores of region B, if both done, their applied logs should be
+\* same.
+MergeLogInvariant ==
+  \A i,j \in Store :
+    (
+      /\ i /= j
+      /\ region[i][RegionB] = RegionTombStone
+      /\ region[j][RegionB] = RegionTombStone
+    ) =>
+      LET
+        index_i == raft[i][RegionB].apply_index
+        index_j == raft[j][RegionB].apply_index
+        logs_i  == SubSeq(raft[i][RegionB].logs, 1, index_i)
+        logs_j  == SubSeq(raft[j][RegionB].logs, 1, index_j)
+      IN
+        /\ index_i = index_j
+        /\ logs_i = logs_j
+
+\* Combination of the above invariants.
+RaftMergeInvariant ==
+  /\ RegionApplyInvariant
+  /\ MergeLastLogInvariant
+  /\ MergeLogInvariant
 
 ===============================================================================
