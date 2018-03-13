@@ -1,6 +1,21 @@
 ------------------------------ MODULE RaftMerge -------------------------------
 
-\* TODO: Add some overall descriptions here.
+\* This is the formal specification for the multi-raft region merge algorithm
+\* of TiKV.
+\*
+\* The whole data is divided into multiple shards called regions, and each
+\* region is replicated to several stores comprising a Raft group. Two regions
+\* can merge into a larger one if one region is reasonably small.
+\*
+\* This specification asserts two regions named A and B are replicated to the
+\* same set of stores. Each region has leader on store LeaderA and LeaderB
+\* respectively.
+\*
+\* Notice that TiKV uses a slightly different Raft model compared with Ongaro's
+\* original Raft implementation. A log is truly committed if the log is applied
+\* to the state machine, and then server will return the result to client.
+\* commit_index is only a marker, log may be dropped even if commit_index goes
+\* beyond that log.
 
 EXTENDS Integers, FiniteSets, Sequences, TLC
 
