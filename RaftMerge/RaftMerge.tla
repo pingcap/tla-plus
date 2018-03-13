@@ -202,13 +202,15 @@ InternalRequest(i, r, log) ==
     [raft EXCEPT ![i][r].logs = new_logs,
                  ![i][r].match_index = new_match_index]
 
-ProposePreMergeRequest(i, r) ==
-  /\ raft[i][r].is_leader
-  /\ SelectSeq(raft[i][r].logs, LAMBDA log : log.type = LogPreMerge) = << >>
+\* Send merge request to the leader of Region B.
+ProposeMergeRequest(i) ==
+  /\ raft[i][RegionB].is_leader
+  /\ \* This request should be sent only once.
+     Len(SelectSeq(raft[i][RegionB].logs, LAMBDA log : log.type = LogPreMerge)) = 0
   /\ raft' = InternalRequest(
-               i, r,
+               i, RegionB,
                [type      |-> LogPreMerge,
-                min_index |-> 1 + Min({raft[i][r].match_index[j] : j \in Store})]
+                min_index |-> 1 + Min({raft[i][RegionB].match_index[j] : j \in Store})]
              )
   /\ UNCHANGED <<messages, region, client_vars>>
 
@@ -252,7 +254,7 @@ ApplyPreMergeLog(i) ==
 \* Apply LogMerge.
 \*
 \* This action is roughly divided into two sub-actions, and executed separately.
-\* The first step copys the logs to region B, to ensure it in sync with leader
+\* The first step copies the logs to region B, to ensure it in sync with leader
 \* B. The second step waits until the copied logs in the first step are applied,
 \* then advances apply_index and marks this region as tombstone.
 ApplyMergeLogStep1(i) ==
@@ -318,7 +320,7 @@ Next ==
   \/ \E i \in Store : ClientRequest(i, RegionB, [type |-> LogNormal])
 
   \* Raft merge actions.
-  \/ ProposePreMergeRequest(LeaderB, RegionB)
+  \/ ProposeMergeRequest(LeaderB)
   \/ \E i \in Store : ApplyLog(i)
 
 Init ==
