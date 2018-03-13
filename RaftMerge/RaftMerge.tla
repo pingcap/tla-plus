@@ -195,7 +195,7 @@ ApplyLog(i, r) ==
 \* Specification of Raft merge.
 Next ==
   \* Raft actions.
-  \/ \E i,j \in Store : \E r \in Region : AppendEntries(i, j, r)
+  \/ \E i, j \in Store : \E r \in Region : AppendEntries(i, j, r)
   \/ \E i \in Store : \E r \in Region : AdvanceCommitIndex(i, r)
   \/ \E m \in messages : Receive(m)
   \/ \E i \in Store : \E r \in Region : ApplyLog(i, r)
