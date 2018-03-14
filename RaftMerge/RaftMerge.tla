@@ -79,6 +79,8 @@ VARIABLES messages
 \* and region[MAXS][2].
 
 \* Log types.
+\* The logs are divided into two categories, normal logs and admin logs.
+\* Logs apart from LogNormal are admin logs.
 CONSTANTS LogNormal,    \* RegionB only
           LogPreMerge,
           LogMerge
@@ -315,8 +317,12 @@ ApplyNormalLog(i, r) ==
   IN
     /\ LogAppliable(i, r)
     /\ raft[i][r].logs[next_index].type = LogNormal
-    /\ raft' = [raft EXCEPT ![i][r].apply_index = next_index,
-                            ![i][r].num_applied = @ + (IF region[i][r] = RegionNormal THEN 1 ELSE 0)]
+    /\ LET
+         \* Apply this log if this region is in normal state, otherwise skip it.
+         num_applied_delta == IF region[i][r] = RegionNormal THEN 1 ELSE 0
+       IN
+         raft' = [raft EXCEPT ![i][r].apply_index = next_index,
+                              ![i][r].num_applied = @ + num_applied_delta]
     /\ UNCHANGED <<messages, region, client_vars>>
 
 \* Apply Raft logs to make apply_index catch up with commit_index.
