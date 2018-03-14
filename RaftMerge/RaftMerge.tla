@@ -291,7 +291,8 @@ ApplyMergeLogStep2(i) ==
     next_index   == raft[i][RegionA].apply_index + 1
     commit_index == raft[i][RegionA].logs[next_index].commit_index
   IN
-    /\ raft[i][RegionB].apply_index = commit_index
+    /\ \* Lag logs have been applied.
+       raft[i][RegionB].apply_index = commit_index
     /\ raft' = [raft EXCEPT ![i][RegionA].apply_index = next_index]
     /\ region' = [region EXCEPT ![i][RegionB] = RegionTombStone]
     /\ UNCHANGED <<messages, client_vars>>
