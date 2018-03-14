@@ -66,6 +66,7 @@ VARIABLES messages
 \*   vector<Log> logs;
 \*   int commit_index;
 \*   int apply_index;
+\*   int num_applied;        // number of applied normal logs
 \*   int match_index[MAXS];  // leader only
 \* };
 \*
@@ -292,7 +293,7 @@ ApplyMergeLogStep2(i) ==
     commit_index == raft[i][RegionA].logs[next_index].commit_index
   IN
     /\ \* Lag logs have been applied.
-       raft[i][RegionB].apply_index = commit_index
+       raft[i][RegionB].apply_index >= commit_index
     /\ raft' = [raft EXCEPT ![i][RegionA].apply_index = next_index]
     /\ region' = [region EXCEPT ![i][RegionB] = RegionTombStone]
     /\ UNCHANGED <<messages, client_vars>>
@@ -314,7 +315,8 @@ ApplyNormalLog(i, r) ==
   IN
     /\ LogAppliable(i, r)
     /\ raft[i][r].logs[next_index].type = LogNormal
-    /\ raft' = [raft EXCEPT ![i][r].apply_index = next_index]
+    /\ raft' = [raft EXCEPT ![i][r].apply_index = next_index,
+                            ![i][r].num_applied = @ + (IF region[i][r] = RegionNormal THEN 1 ELSE 0)]
     /\ UNCHANGED <<messages, region, client_vars>>
 
 \* Apply Raft logs to make apply_index catch up with commit_index.
@@ -351,6 +353,7 @@ Init ==
                               logs         |-> << >>,
                               commit_index |-> 0,
                               apply_index  |-> 0,
+                              num_applied  |-> 0,
                               match_index  |-> [j \in Store |-> 0]
                              ]
                            ]
@@ -385,6 +388,7 @@ RaftType ==
     logs         : Seq(LogType),
     commit_index : Nat,
     apply_index  : Nat,
+    num_applied  : Nat,
     match_index  : [Store -> Nat]  \* Only available on leader.
                                    \* Initialized to zeroes on followers.
   ]
@@ -456,15 +460,8 @@ RegionApplyInvariant ==
     ) =>
       \A r \in Region : region[i][r] = region[j][r]
 
-\* After Raft merge is done, the last applied log of region B should be
-\* LogPreMerge.
-MergeLastLogInvariant ==
-  \A i \in Store :
-    region[i][RegionB] = RegionTombStone =>
-      raft[i][RegionB].logs[raft[i][RegionB].apply_index].type = LogPreMerge
-
-\* For any two stores of region B, if both done, their applied logs should be
-\* same.
+\* For any two stores of region B, if both done, they should have the same
+\* number of applied logs.
 MergeLogInvariant ==
   \A i, j \in Store :
     (
@@ -473,18 +470,14 @@ MergeLogInvariant ==
       /\ region[j][RegionB] = RegionTombStone
     ) =>
       LET
-        index_i == raft[i][RegionB].apply_index
-        index_j == raft[j][RegionB].apply_index
-        logs_i  == SubSeq(raft[i][RegionB].logs, 1, index_i)
-        logs_j  == SubSeq(raft[j][RegionB].logs, 1, index_j)
+        applied_i == raft[i][RegionB].num_applied
+        applied_j == raft[j][RegionB].num_applied
       IN
-        /\ index_i = index_j
-        /\ logs_i = logs_j
+        applied_i = applied_j
 
 \* Combination of the above invariants.
 RaftMergeInvariant ==
   /\ RegionApplyInvariant
-  /\ MergeLastLogInvariant
   /\ MergeLogInvariant
 
 ===============================================================================
