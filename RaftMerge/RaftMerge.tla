@@ -77,6 +77,12 @@ VARIABLES messages
 \*
 \* Note for ease of implementation, we use two 2-dimension arrays raft[MAXS][2]
 \* and region[MAXS][2].
+\*
+\* Also note that different from a real-world implementation, we don't
+\* introduce the concept of `epoch` here, which is used to figure out whether
+\* the configuration of one region has changed. Epoch matters when we are
+\* applying the logs into state machine, if it is stale, we will skip all
+\* later non-admin logs. Epoch will be changed when we are applying admin logs.
 
 \* Log types.
 \* The logs are divided into two categories, normal logs and admin logs.
@@ -319,6 +325,10 @@ ApplyNormalLog(i, r) ==
     /\ raft[i][r].logs[next_index].type = LogNormal
     /\ LET
          \* Apply this log if this region is in normal state, otherwise skip it.
+         \* Notice we don't check for epoch here as what is done in the real
+         \* world implementation, but these two approaches are equivalent to
+         \* check whether we have applied PreMergeLog, as applying PreMergeLog
+         \* will also convert the region state from normal state.
          num_applied_delta == IF region[i][r] = RegionNormal THEN 1 ELSE 0
        IN
          raft' = [raft EXCEPT ![i][r].apply_index = next_index,
