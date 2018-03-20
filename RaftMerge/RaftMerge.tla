@@ -287,9 +287,14 @@ ApplyMergeLogStep1(i) ==
     next_index   == raft[i][RegionA].apply_index + 1
     min_index    == raft[i][RegionA].logs[next_index].min_index
     commit_index == raft[i][RegionA].logs[next_index].commit_index
-    new_logs     == SubSeq(raft[i][RegionB].logs, 1, min_index - 1)
-                    \o raft[i][RegionA].logs[next_index].entries
-                    \o SubSeq(raft[i][RegionB].logs, commit_index + 1, Len(raft[i][RegionB].logs))
+    new_logs     ==
+      LET
+        old_logs == raft[i][RegionB].logs
+        entries  == raft[i][RegionA].logs[next_index].entries
+      IN
+        IF commit_index <= Len(raft[i][RegionB].logs)
+        THEN old_logs
+        ELSE old_logs \o SubSeq(entries, Len(old_logs) - min_index + 2, Len(entries))
   IN
     /\ raft' = [raft EXCEPT ![i][RegionB].logs = new_logs,
                             ![i][RegionB].commit_index = Max({@, commit_index})]
