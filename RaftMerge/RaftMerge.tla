@@ -341,8 +341,8 @@ ApplyMergeLog(i) ==
        \/ ApplyMergeLogStep2(i)
 
 \* Apply LogRollback.
-\* As we don't skip all logs after PreMerge log, rollback just marks the state
-\* of region as normal.
+\* As we skip all logs after PreMerge log, rollback just marks the state of
+\* region as normal.
 ApplyRollbackLog(i) ==
   LET
     next_index == raft[i][RegionB].apply_index + 1
