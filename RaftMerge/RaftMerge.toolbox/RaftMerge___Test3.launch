@@ -24,12 +24,8 @@
 <booleanAttribute key="modelCorrectnessCheckDeadlock" value="true"/>
 <listAttribute key="modelCorrectnessInvariants">
 <listEntry value="1TypeInvariant"/>
-<listEntry value="1OneLeaderInvariant"/>
-<listEntry value="1AppendEntriesMessageInvariant"/>
-<listEntry value="1LogInvariant"/>
-<listEntry value="1ApplyIndexInvariant"/>
-<listEntry value="1RegionApplyInvariant"/>
-<listEntry value="1MergeLogInvariant"/>
+<listEntry value="1SimpliedRaftInvariant"/>
+<listEntry value="1RaftMergeInvariant"/>
 </listAttribute>
 <listAttribute key="modelCorrectnessProperties"/>
 <stringAttribute key="modelExpressionEval" value=""/>
