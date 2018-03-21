@@ -27,6 +27,10 @@ ASSUME /\ Region = {RegionA, RegionB}
        /\ LeaderA \in Store
        /\ LeaderB \in Store
 
+\* If TRUE, a rollback will be performed in place of merge.
+CONSTANTS WillPerformRollback
+ASSUME WillPerformRollback \in BOOLEAN
+
 \* The minimum size of servers to be a quorum.
 \*
 \* The motivation of adding this constant is that, Raft with 1 leader and 2
@@ -57,7 +61,7 @@ VARIABLES messages
 
 \* The data structures in C. MAXS = |Store|.
 \*
-\* enum Log { LogNormal, LogPreMerge, LogMerge };
+\* enum Log { LogNormal, LogPreMerge, LogMerge, LogRollback };
 \*
 \* enum RegionState { RegionNormal, RegionTombStone, RegionMerging };
 \*
@@ -89,7 +93,8 @@ VARIABLES messages
 \* Logs apart from LogNormal are admin logs.
 CONSTANTS LogNormal,    \* RegionB only
           LogPreMerge,
-          LogMerge
+          LogMerge,
+          LogRollback
 
 \* Region state types.
 CONSTANTS RegionNormal,
@@ -230,6 +235,7 @@ InternalRequest(i, r, log) ==
 \* Send merge request to the leader of Region B.
 ProposeMergeRequest(i) ==
   /\ raft[i][RegionB].is_leader
+  /\ region[i][RegionB] = RegionNormal
   /\ \* This request should be sent only once.
      Len(SelectSeq(raft[i][RegionB].logs, LAMBDA log : log.type = LogPreMerge)) = 0
   /\ raft' = InternalRequest(
@@ -237,6 +243,16 @@ ProposeMergeRequest(i) ==
                [type      |-> LogPreMerge,
                 min_index |-> 1 + Min({raft[i][RegionB].match_index[j] : j \in Store})]
              )
+  /\ UNCHANGED <<messages, region, client_vars>>
+
+\* Perform rollback by appending a rollback log on leader B.
+PerformRollbackRequest(i) ==
+  /\ WillPerformRollback = TRUE
+  /\ raft[i][RegionB].is_leader
+  /\ region[i][RegionB] = RegionMerging
+  /\ \* This log should be appended only once.
+     Len(SelectSeq(raft[i][RegionB].logs, LAMBDA log : log.type = LogRollback)) = 0
+  /\ raft' = InternalRequest(i, RegionB, [type |-> LogRollback])
   /\ UNCHANGED <<messages, region, client_vars>>
 
 \* Return TRUE if there is a log applicable to the state machine.
@@ -308,7 +324,11 @@ ApplyMergeLogStep2(i) ==
     /\ \* Lag logs have been applied.
        raft[i][RegionB].apply_index >= commit_index
     /\ raft' = [raft EXCEPT ![i][RegionA].apply_index = next_index]
-    /\ region' = [region EXCEPT ![i][RegionB] = RegionTombStone]
+    /\ IF WillPerformRollback = FALSE
+       THEN
+         region' = [region EXCEPT ![i][RegionB] = RegionTombStone]
+       ELSE
+         UNCHANGED <<region>>
     /\ UNCHANGED <<messages, client_vars>>
 
 ApplyMergeLog(i) ==
@@ -319,6 +339,19 @@ ApplyMergeLog(i) ==
     /\ raft[i][RegionA].logs[next_index].type = LogMerge
     /\ \/ ApplyMergeLogStep1(i)
        \/ ApplyMergeLogStep2(i)
+
+\* Apply LogRollback.
+\* As we don't skip all logs after PreMerge log, rollback just marks the state
+\* of region as normal.
+ApplyRollbackLog(i) ==
+  LET
+    next_index == raft[i][RegionB].apply_index + 1
+  IN
+    /\ LogAppliable(i, RegionB)
+    /\ raft[i][RegionB].logs[next_index].type = LogRollback
+    /\ raft' = [raft EXCEPT ![i][RegionB].apply_index = next_index]
+    /\ region' = [region EXCEPT ![i][RegionB] = RegionNormal]
+    /\ UNCHANGED <<messages, client_vars>>
 
 \* Apply LogNormal.
 \* This log simply increases apply_index.
@@ -345,6 +378,7 @@ ApplyLog(i) ==
   \/ \E r \in Region : ApplyNormalLog(i, r)
   \/ ApplyPreMergeLog(i)
   \/ ApplyMergeLog(i)
+  \/ ApplyRollbackLog(i)
 
 -------------------------------------------------------------------------------
 
@@ -361,6 +395,7 @@ Next ==
 
   \* Raft merge actions.
   \/ ProposeMergeRequest(LeaderB)
+  \/ PerformRollbackRequest(LeaderB)
   \/ \E i \in Store : ApplyLog(i)
 
 Init ==
@@ -397,6 +432,7 @@ LogType ==
     FlatLogType ==
            [type : {LogNormal}]
       \cup [type : {LogPreMerge}, min_index : Nat]
+      \cup [type : {LogRollback}]
   IN
          FlatLogType
     \cup [type : {LogMerge},
@@ -472,14 +508,16 @@ SimpliedRaftInvariant ==
 \* Some invariants for Raft region merge.
 
 \* If a region on two different stores have applied the same logs, they should
-\* also share the same region state.
+\* also share the same region state and number of applied normal logs.
 RegionApplyInvariant ==
   \A i, j \in Store :
     (
       /\ i /= j
       /\ (\A r \in Region : raft[i][r].apply_index = raft[j][r].apply_index)
     ) =>
-      \A r \in Region : region[i][r] = region[j][r]
+      \A r \in Region :
+        /\ region[i][r] = region[j][r]
+        /\ raft[i][RegionB].num_applied = raft[j][RegionB].num_applied
 
 \* For any two stores of region B, if both done, they should have the same
 \* number of applied logs.
@@ -490,11 +528,7 @@ MergeLogInvariant ==
       /\ region[i][RegionB] = RegionTombStone
       /\ region[j][RegionB] = RegionTombStone
     ) =>
-      LET
-        applied_i == raft[i][RegionB].num_applied
-        applied_j == raft[j][RegionB].num_applied
-      IN
-        applied_i = applied_j
+      raft[i][RegionB].num_applied = raft[j][RegionB].num_applied
 
 \* Combination of the above invariants.
 RaftMergeInvariant ==
