@@ -1,6 +1,6 @@
 ------------------------------- MODULE Percolator ------------------------------
 
-EXTENDS Integers, FiniteSets, Sequences, TLAPS, TLC
+EXTENDS Integers, FiniteSets, Sequences, TLC
 
 \* The set of transaction keys.
 CONSTANTS KEY
@@ -227,14 +227,14 @@ Get(c) ==
 Prewrite(c) ==
   /\ client_state[c] = "prewriting"
   /\ IF client_key[c].pending = {}
-       THEN  \* all keys have been pre-written
-         /\ next_ts' = next_ts + 1
-         /\ client_state' = [client_state EXCEPT ![c] = "committing"]
-         /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = next_ts']
-         /\ UNCHANGED <<key_vars, client_key>>
-       ELSE
-         /\ lock(c)
-         /\ UNCHANGED <<next_ts>>
+     THEN  \* all keys have been pre-written
+       /\ next_ts' = next_ts + 1
+       /\ client_state' = [client_state EXCEPT ![c] = "committing"]
+       /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = next_ts']
+       /\ UNCHANGED <<key_vars, client_key>>
+     ELSE
+       /\ lock(c)
+       /\ UNCHANGED <<next_ts>>
 
 \* If we commit the primary key successfully, we can think the transaction is
 \* committed.
@@ -392,149 +392,10 @@ SnapshotIsolation ==
     key_si[k] = TRUE
 
 --------------------------------------------------------------------------------
-\* Used for symmetry reduction with TLC.
+\* Used for symmetry reduction in TLC.
 Symmetry == Permutations(CLIENT)
 
 --------------------------------------------------------------------------------
-\* TLAPS proof for proving Spec keeps type invariant.
-LEMMA InitStateSatisfiesTypeInvariant ==
-  Init => TypeInvariant
-PROOF
-<1> USE DEF Init, TypeInvariant
-<1> USE DEF NextTsTypeInv, ClientStateTypeInv, ClientTsTypeInv, ClientKeyTypeInv,
-            KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv,
-            KeyLastReadTsTypeInv, KeySiTypeInv
-<1> QED BY SMT, KeyNotEmpty
-
-LEMMA findWriteWithStartTSTypeInv ==
-  ASSUME key_write \in [KEY -> Seq([start_ts: Nat, commit_ts: Nat])],
-         NEW k \in KEY,
-         NEW ts \in Nat
-  PROVE findWriteWithStartTS(k, ts) \in SUBSET [start_ts : Nat, commit_ts : Nat]
-PROOF
-<1> DEFINE ws == key_write[k]
-<1> DEFINE Type == [start_ts : Nat, commit_ts : Nat]
-<1>a ws = key_write[k] OBVIOUS
-<1>b Type = [start_ts : Nat, commit_ts : Nat] OBVIOUS
-<1>c ws \in Seq(Type) BY DEF KeyWriteTypeInv
-<1> HIDE DEF ws, Type
-<1>d SUFFICES ASSUME NEW w \in DOMAIN ws
-     PROVE ws[w] \in Type
-     BY DEF findWriteWithStartTS, ws, Type
-<1> QED BY Z3, <1>c
-
-LEMMA NextKeepsTypeInvariant ==
-  TypeInvariant /\ Next => TypeInvariant'
-PROOF
-<1> SUFFICES ASSUME TypeInvariant, Next PROVE TypeInvariant' OBVIOUS
-<1> USE DEF TypeInvariant
-<1> USE DEF client_vars, key_vars
-<1> PICK c \in CLIENT : ClientOp(c) BY DEF Next
-<1>a CASE Start(c)
-  <2> USE DEF Start
-  <2> USE DEF NextTsTypeInv, ClientStateTypeInv, ClientTsTypeInv, ClientKeyTypeInv,
-              KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv,
-              KeyLastReadTsTypeInv, KeySiTypeInv
-  <2> QED BY <1>a
-<1>b CASE Get(c)
-  <2> USE DEF Get, cleanup, readKey
-  <2>a NextTsTypeInv'
-       BY <1>b DEF NextTsTypeInv
-  <2>b ClientStateTypeInv'
-       BY <1>b DEF ClientStateTypeInv
-  <2>c ClientTsTypeInv'
-       BY <1>b DEF ClientTsTypeInv
-  <2>d ClientKeyTypeInv'
-       BY <1>b DEF ClientKeyTypeInv
-  <2>e KeyDataTypeInv'
-       BY <1>b DEF KeyDataTypeInv, cleanupStaleLock
-  <2>f KeyLockTypeInv'
-       BY <1>b DEF KeyLockTypeInv, cleanupStaleLock
-  <2>g KeyWriteTypeInv'
-    <3>a ASSUME NEW k1 \in KEY,
-                NEW ts1 \in Nat,
-                cleanupStaleLock(k1, ts1)
-         PROVE KeyWriteTypeInv'
-         BY <3>a, findWriteWithStartTSTypeInv
-         DEF ClientTsTypeInv, ClientKeyTypeInv, KeyWriteTypeInv,
-             KeyLockTypeInv, KeyDataTypeInv, cleanupStaleLock
-    <3> QED BY <1>b, <3>a DEF KeyWriteTypeInv, ClientKeyTypeInv, ClientTsTypeInv
-  <2>h KeyLastReadTsTypeInv'
-    <3>a ASSUME readKey(c)
-         PROVE KeyLastReadTsTypeInv'
-         BY <3>a DEF KeyLastReadTsTypeInv, ClientKeyTypeInv, ClientTsTypeInv
-    <3> QED BY <1>b, <3>a DEF KeyLastReadTsTypeInv, cleanupStaleLock
-  <2>i KeySiTypeInv'
-       BY <1>b DEF KeySiTypeInv, cleanupStaleLock, checkSnapshotIsolation
-  <2> QED BY <2>a, <2>b, <2>c, <2>d, <2>e, <2>f, <2>g, <2>h, <2>i
-<1>c CASE Prewrite(c)
-  <2> USE DEF Prewrite, lock, lockKey
-  <2>a NextTsTypeInv'
-    <3>a \/ next_ts' = next_ts + 1
-         \/ UNCHANGED <<next_ts>>
-         BY <1>c DEF NextTsTypeInv
-    <3> QED BY <3>a DEF NextTsTypeInv
-  <2>b ClientStateTypeInv'
-       BY <1>c DEF ClientStateTypeInv
-  <2>c ClientTsTypeInv'
-       BY <1>c, <2>a DEF ClientTsTypeInv, NextTsTypeInv
-  <2>d ClientKeyTypeInv'
-    <3>a CASE client_key[c].pending = {}
-         BY <1>c, <3>a DEF ClientKeyTypeInv
-    <3>b CASE client_key[c].pending # {}
-      <4>a \E k \in KEY :
-             client_key' = [client_key EXCEPT ![c].pending = @ \ {k}]
-           BY <1>c, <3>b DEF ClientKeyTypeInv
-      <4>b PICK k \in KEY : client_key' = [client_key EXCEPT ![c].pending = @ \ {k}]
-           BY <4>a
-      <4> QED BY <4>b DEF ClientKeyTypeInv
-    <3> QED BY <3>a, <3>b
-  <2>e KeyDataTypeInv'
-    <3>a CASE client_key[c].pending = {}
-         BY <1>c, <3>a DEF KeyDataTypeInv
-    <3>b CASE client_key[c].pending # {}
-      <4>a \E k \in KEY : \E ts \in Nat :
-             key_data' = [key_data EXCEPT ![k] = @ \cup {ts}]
-           BY <1>c, <3>b DEF KeyDataTypeInv, ClientKeyTypeInv, ClientTsTypeInv
-      <4> QED BY <4>a DEF KeyDataTypeInv
-    <3> QED BY <3>a, <3>b
-  <2>f KeyLockTypeInv'
-    <3>a CASE client_key[c].pending = {}
-         BY <1>c, <3>a DEF KeyLockTypeInv
-    <3>b CASE client_key[c].pending # {}
-      <4>a \E k \in KEY : \E l \in [ts : Nat, primary : KEY] :
-             key_lock' = [key_lock EXCEPT ![k] = @ \cup {l}]
-           BY <1>c, <3>b DEF KeyLockTypeInv, ClientKeyTypeInv, ClientTsTypeInv
-      <4> QED BY <4>a DEF KeyLockTypeInv
-    <3> QED BY <3>a, <3>b
-  <2>g KeyWriteTypeInv'
-       BY <1>c DEF KeyWriteTypeInv
-  <2>h KeyLastReadTsTypeInv'
-       BY <1>c DEF KeyLastReadTsTypeInv
-  <2>i KeySiTypeInv'
-       BY <1>c DEF KeySiTypeInv
-  <2> QED BY <2>a, <2>b, <2>c, <2>d, <2>e, <2>f, <2>g, <2>h, <2>i
-<1>d CASE Commit(c)
-  <2> USE DEF Commit, commitPrimary, lock, lockKey, checkSnapshotIsolation
-  <2> USE DEF NextTsTypeInv, ClientStateTypeInv, ClientTsTypeInv, ClientKeyTypeInv,
-              KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv,
-              KeyLastReadTsTypeInv, KeySiTypeInv
-  <2> QED BY <1>d
-<1>e CASE Abort(c)
-  <2> USE DEF Abort
-  <2> USE DEF NextTsTypeInv, ClientStateTypeInv, ClientTsTypeInv, ClientKeyTypeInv,
-              KeyDataTypeInv, KeyLockTypeInv, KeyWriteTypeInv,
-              KeyLastReadTsTypeInv, KeySiTypeInv
-  <2> QED BY <1>e
-<1> QED BY <1>a, <1>b, <1>c, <1>d, <1>e DEF ClientOp
-
-THEOREM TypeSafety ==
-  PercolatorSpec => []TypeInvariant
-PROOF
-<1> SUFFICES ASSUME Init /\ [][Next]_vars PROVE []TypeInvariant
-    BY DEF PercolatorSpec
-<1> QED BY InitStateSatisfiesTypeInvariant, NextKeepsTypeInvariant, PTL
-
 THEOREM Safety ==
   PercolatorSpec => [](/\ TypeInvariant
                        /\ WriteConsistency
