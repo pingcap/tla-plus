@@ -110,9 +110,9 @@ cleanupStaleLock(k, ts) ==
           /\ UNCHANGED <<key_write, key_si>>
        \/ /\ l.primary # k  \* this is a secondary key.
           /\ LET
-                ws == findWriteWithStartTS(l.primary, l.ts)
+                writes == findWriteWithStartTS(l.primary, l.ts)
               IN
-                IF ws = {}
+                IF writes = {}
                 THEN
                   \* the primary key is not committed, clean up the data.
                   \* Note we should always clean up the corresponding primary
@@ -128,7 +128,7 @@ cleanupStaleLock(k, ts) ==
                     /\ UNCHANGED <<key_write, key_si>>
                 ELSE
                   \* the primary key is committed, commit the secondary key.
-                  \E w \in ws :
+                  \E w \in writes :
                     /\ key_lock' = [key_lock EXCEPT ![k] = @ \ {l}]
                     /\ key_write' = [key_write EXCEPT ![k] = Append(@, w)]
                     /\ checkSnapshotIsolation(k, w.ts)
