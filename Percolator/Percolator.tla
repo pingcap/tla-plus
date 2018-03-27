@@ -54,6 +54,10 @@ key_vars == <<key_data, key_lock, key_write, key_last_read_ts, key_si>>
 vars == <<next_ts, client_vars, key_vars>>
 
 --------------------------------------------------------------------------------
+Range(m) ==
+  {m[i] : i \in DOMAIN m}
+
+--------------------------------------------------------------------------------
 \* Checks whether there is a lock of key $k$, whose $ts$ is less or equal than
 \* $ts$.
 hasLockLE(k, ts) ==
@@ -74,11 +78,11 @@ hasStaleLock(k, ts) ==
 
 \* Returns the writes with start_ts equals to $ts$.
 findWriteWithStartTS(k, ts) ==
-  {key_write[k][w] : w \in {w \in DOMAIN key_write[k] : key_write[k][w].start_ts = ts}}
+  {w \in Range(key_write[k]) : w.start_ts = ts}
 
 \* Returns the writes with commit_ts equals to $ts$.
 findWriteWithCommitTS(k, ts) ==
-  {key_write[k][w] : w \in {w \in DOMAIN key_write[k] : key_write[k][w].ts = ts}}
+  {w \in Range(key_write[k]) : w.ts = ts}
 
 \* Updates $key_si$ for key $k$. If a new version of key $k$ is committed with
 \* $commit_ts$ < last read timestamp, consider the snapshot isolation invariant
