@@ -86,6 +86,7 @@ findWriteWithStartTS(k, ts) ==
 findWriteWithCommitTS(k, ts) ==
   {w \in Range(key_write[k]) : (w.type = "write" /\ w.ts = ts)}
 
+\* Returns TRUE if there is a rollback for key $k$ at timestamp $ts$.
 hasRollback(k, ts) ==
   {r \in Range(key_write[k]) : (r.type = "rollback" /\ r.ts = ts)} # {}
 
@@ -106,11 +107,12 @@ checkSnapshotIsolation(k, commit_ts) ==
 \*   2. Otherwise, clean up the stale data too.
 cleanupStaleLock(k, ts) ==
   LET
+    \* Erases the lock by removing data and lock, and write a rollback record.
     eraseLock(key, l) ==
       /\ key_data' = [key_data EXCEPT ![key] = @ \ {[ts |-> l.ts]}]
       /\ key_lock' = [key_lock EXCEPT ![key] = @ \ {l}]
-      /\ key_write' = [key_write EXCEPT ![key] = Append(@, [ts |-> l.ts,
-                                                            type |-> "rollback"])]
+      /\ key_write' = [key_write EXCEPT ![key] =
+                         Append(@, [ts |-> l.ts, type |-> "rollback"])]
   IN
     \E l \in key_lock[k] :
       /\ isStaleLock(l, ts)
