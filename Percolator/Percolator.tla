@@ -4,8 +4,7 @@ EXTENDS Integers, FiniteSets, Sequences, TLC
 
 \* The set of transaction keys.
 CONSTANTS KEY
-
-AXIOM KeyNotEmpty == KEY # {} \* Keys cannot be empty.
+ASSUME KEY # {} \* Keys cannot be empty.
 
 \* The set of clients to execute a transaction.
 CONSTANTS CLIENT
@@ -25,29 +24,38 @@ VARIABLES client_ts
 \* prewrite.
 VARIABLES client_key
 
-\* $key_data[k]$ is the set of multi-version data timestamp of the key.
-\* Only start_ts.
+\* $key_data[k]$ is the set of multi-version data of the key.
+\* Since we don't care about the concrete value of data, a record of
+\* [ts: start_ts] is sufficient to represent one data version.
 VARIABLES key_data
 
-\* $key_lock[k]$ is the set of lock. A lock is of a record
-\* [ts: ts, primary: lock]. $ts$ is for start_ts. If $primary$ equals to $k$,
-\* it is a primary lock, otherwise secondary lock.
+\* $key_lock[k]$ is the set of lock. A lock is of a record of
+\* [ts: start_ts, primary: lock]. If $primary$ equals to $k$, it is a primary
+\* lock, otherwise secondary lock.
 VARIABLES key_lock
 
 \* $key_write[k]$ is a sequence of committed version of the key.
-\* A committed version of the key is a record of [start_ts: ts, commit_ts: ts].
+\* A committed version of the key is a record of [ts: commit_ts,
+\* start_ts: start_ts].
 VARIABLES key_write
 
-\* Two auxiliary variables for verifying snapshot isolation invariant.
+\* Two auxiliary variables for verifying snapshot isolation invariant. These
+\* variables should not appear in a real-world implementation.
+\*
 \* $key_last_read_ts[k]$ denotes the last read timestamp for key $k$, this
 \* should be monotonic.
-\* $key_si[k]$ denotes the if the snapshot isolation invariant is preserved for
+\*
+\* $key_si[k]$ denotes if the snapshot isolation invariant is preserved for
 \* key $k$ so far.
 VARIABLES key_last_read_ts, key_si
 
 client_vars == <<client_state, client_ts, client_key>>
 key_vars == <<key_data, key_lock, key_write, key_last_read_ts, key_si>>
 vars == <<next_ts, client_vars, key_vars>>
+
+--------------------------------------------------------------------------------
+Range(m) ==
+  {m[i] : i \in DOMAIN m}
 
 --------------------------------------------------------------------------------
 \* Checks whether there is a lock of key $k$, whose $ts$ is less or equal than
@@ -61,20 +69,20 @@ hasLockEQ(k, ts) ==
 
 \* Returns TRUE if a lock can be cleanup up.
 \* A lock can be cleaned up iff its ts is less than or equal to $ts$.
-isStaleLock(k, l, ts) ==
+isStaleLock(l, ts) ==
   l.ts <= ts
 
 \* Returns TRUE if we have a stale lock for key $k$.
 hasStaleLock(k, ts) ==
-  \E l \in key_lock[k] : isStaleLock(k, l, ts)
+  \E l \in key_lock[k] : isStaleLock(l, ts)
 
 \* Returns the writes with start_ts equals to $ts$.
 findWriteWithStartTS(k, ts) ==
-  {key_write[k][w] : w \in {w \in DOMAIN key_write[k] : key_write[k][w].start_ts = ts}}
+  {w \in Range(key_write[k]) : w.start_ts = ts}
 
 \* Returns the writes with commit_ts equals to $ts$.
 findWriteWithCommitTS(k, ts) ==
-  {key_write[k][w] : w \in {w \in DOMAIN key_write[k] : key_write[k][w].commit_ts = ts}}
+  {w \in Range(key_write[k]) : w.ts = ts}
 
 \* Updates $key_si$ for key $k$. If a new version of key $k$ is committed with
 \* $commit_ts$ < last read timestamp, consider the snapshot isolation invariant
@@ -93,37 +101,37 @@ checkSnapshotIsolation(k, commit_ts) ==
 \*   2. Otherwise, clean up the stale data too.
 cleanupStaleLock(k, ts) ==
   \E l \in key_lock[k] :
-    /\ isStaleLock(k, l, ts)
+    /\ isStaleLock(l, ts)
     /\ UNCHANGED <<key_last_read_ts>>
     /\ \/ /\ l.primary = k  \* this is a primary key, always rollback
                             \* because it is not committed.
-          /\ key_data' = [key_data EXCEPT ![k] = @ \ {l.ts}]
+          /\ key_data' = [key_data EXCEPT ![k] = @ \ {[ts |-> l.ts]}]
           /\ key_lock' = [key_lock EXCEPT ![k] = @ \ {l}]
           /\ UNCHANGED <<key_write, key_si>>
        \/ /\ l.primary # k  \* this is a secondary key.
           /\ LET
-                ws == findWriteWithStartTS(l.primary, l.ts)
+                writes == findWriteWithStartTS(l.primary, l.ts)
               IN
-                IF ws = {}
+                IF writes = {}
                 THEN
                   \* the primary key is not committed, clean up the data.
                   \* Note we should always clean up the corresponding primary
                   \* lock first, then this secondary lock.
                   IF hasLockEQ(l.primary, l.ts)
                   THEN
-                    /\ key_data' = [key_data EXCEPT ![l.primary] = @ \ {l.ts}]
+                    /\ key_data' = [key_data EXCEPT ![l.primary] = @ \ {[ts |-> l.ts]}]
                     /\ key_lock' = [key_lock EXCEPT ![l.primary] = @ \ {l}]
                     /\ UNCHANGED <<key_write, key_si>>
                   ELSE
-                    /\ key_data' = [key_data EXCEPT ![k] = @ \ {l.ts}]
+                    /\ key_data' = [key_data EXCEPT ![k] = @ \ {[ts |-> l.ts]}]
                     /\ key_lock' = [key_lock EXCEPT ![k] = @ \ {l}]
                     /\ UNCHANGED <<key_write, key_si>>
                 ELSE
                   \* the primary key is committed, commit the secondary key.
-                  \E w \in ws :
+                  \E w \in writes :
                     /\ key_lock' = [key_lock EXCEPT ![k] = @ \ {l}]
                     /\ key_write' = [key_write EXCEPT ![k] = Append(@, w)]
-                    /\ checkSnapshotIsolation(k, w.commit_ts)
+                    /\ checkSnapshotIsolation(k, w.ts)
                     /\ UNCHANGED <<key_data>>
 
 \* Cleans up a stale lock when the client encounters one.
@@ -156,7 +164,7 @@ readKey(c) ==
 \* $ts$.
 canLockKey(k, ts) ==
   LET
-    writes == {w \in DOMAIN key_write[k] : key_write[k][w].commit_ts >= ts}
+    writes == {w \in DOMAIN key_write[k] : key_write[k][w].ts >= ts}
   IN
     /\ key_lock[k] = {}  \* no any lock for the key.
     /\ writes = {}       \* no any newer write.
@@ -164,7 +172,7 @@ canLockKey(k, ts) ==
 \* Locks the key and places the data.
 lockKey(k, start_ts, primary) ==
   /\ key_lock' = [key_lock EXCEPT ![k] = @ \union {[ts |-> start_ts, primary |-> primary]}]
-  /\ key_data' = [key_data EXCEPT ![k] = @ \union {start_ts}]
+  /\ key_data' = [key_data EXCEPT ![k] = @ \union {[ts |-> start_ts]}]
   /\ UNCHANGED <<key_write, key_last_read_ts, key_si>>
 
 \* Tries to lock primary key first, then the secondary key.
@@ -172,7 +180,6 @@ lock(c) ==
   LET
     start_ts == client_ts[c].start_ts
     primary == client_key[c].primary
-    secondary == client_key[c].secondary
     pending == client_key[c].pending
   IN
     IF primary \in pending
@@ -196,7 +203,7 @@ commitPrimary(c) ==
     primary == client_key[c].primary
   IN
     /\ hasLockEQ(primary, start_ts)
-    /\ key_write' = [key_write EXCEPT ![primary] = Append(@, client_ts[c])]
+    /\ key_write' = [key_write EXCEPT ![primary] = Append(@, [ts |-> commit_ts, start_ts |-> start_ts])]
     /\ key_lock' = [key_lock EXCEPT ![primary] = @ \ {[ts |-> start_ts, primary |-> primary]}]
     /\ checkSnapshotIsolation(primary, commit_ts)
     /\ UNCHANGED <<key_data, key_last_read_ts>>
@@ -301,13 +308,13 @@ ClientKeyTypeInv ==
                              pending : SUBSET KEY]]
 
 KeyDataTypeInv ==
-  key_data \in [KEY -> SUBSET Nat]
+  key_data \in [KEY -> SUBSET [ts : Nat]]
 
 KeyLockTypeInv ==
   key_lock \in [KEY -> SUBSET [ts : Nat, primary : KEY]]
 
 KeyWriteTypeInv ==
-  key_write \in [KEY -> Seq([start_ts : Nat, commit_ts : Nat])]
+  key_write \in [KEY -> Seq([ts : Nat, start_ts : Nat])]
 
 KeyLastReadTsTypeInv ==
   key_last_read_ts \in [KEY -> Nat]
@@ -333,10 +340,10 @@ TypeInvariant ==
 WriteConsistency ==
   /\ \A k \in KEY :
        \A n \in 1..Len(key_write[k]) - 1 :
-         key_write[k][n].commit_ts < key_write[k][n + 1].start_ts
+         key_write[k][n].ts < key_write[k][n + 1].start_ts
   /\ \A k \in KEY :
        \A n \in 1..Len(key_write[k]) :
-         key_write[k][n].start_ts < key_write[k][n].commit_ts
+         key_write[k][n].start_ts < key_write[k][n].ts
 
 LockConsistency ==
   \* There should be at most one lock for each key.
@@ -358,13 +365,13 @@ CommittedConsistency ==
       commit_ts == client_ts[c].commit_ts
       primary == client_key[c].primary
       secondary == client_key[c].secondary
-      w == [start_ts |-> start_ts, commit_ts |-> commit_ts]
+      w == [ts |-> commit_ts, start_ts |-> start_ts]
     IN
       client_state[c] = "committed" =>
         \* The primary key lock must be cleaned up, and no any older lock.
         /\ ~hasLockLE(primary, start_ts)
         /\ findWriteWithCommitTS(primary, commit_ts) = {w}
-        /\ start_ts \in key_data[primary]
+        /\ [ts |-> start_ts] \in key_data[primary]
         /\ \A k \in secondary :
            \* The secondary key lock can be empty or not.
            /\ \/ /\ ~hasLockEQ(k, start_ts)
@@ -373,10 +380,11 @@ CommittedConsistency ==
               \/ /\ hasLockEQ(k, start_ts)
                  /\ findWriteWithCommitTS(k, commit_ts) = {}
                  /\ (Len(key_write[k]) > 0 =>
-                      \* Lock has not been cleaned up, so the last write
-                      \* committed timestamp must be less than lock start_ts.
-                      key_write[k][Len(key_write[k])].commit_ts < start_ts)
-           /\ start_ts \in key_data[k]
+                      \* Lock has not been cleaned up, so the committed
+                      \* timestamp of last write must be less than lock's
+                      \* start_ts.
+                      key_write[k][Len(key_write[k])].ts < start_ts)
+           /\ [ts |-> start_ts] \in key_data[k]
 
 \* If one transaction is aborted, there should be no committed primary key.
 AbortedConsistency ==
