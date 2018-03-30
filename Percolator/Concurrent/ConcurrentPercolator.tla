@@ -412,6 +412,28 @@ AbortedConsistency ==
     ) =>
       findWriteWithCommitTS(client_key[c].primary, client_ts[c].commit_ts) = {}
 
+\* For each transaction, we cannot have both committed and rolled back keys.
+RollbackConsistency ==
+  \A c \in CLIENT :
+    LET
+      start_ts == client_ts[c].start_ts
+      hasWriteKey == \E k \in KEY : findWriteWithStartTS(k, start_ts) # {}
+      hasRollbackKey == \E k \in KEY : hasRollback(k, start_ts)
+    IN
+      start_ts > 0 => ~ (hasWriteKey /\ hasRollbackKey)
+
+\* For each key, each write or rollback record in write column should have a
+\* unique start_ts.
+UniqueWrite ==
+  LET
+    getStartTs(w) ==
+      IF w.type = "write"
+      THEN w.start_ts
+      ELSE w.ts
+  IN
+    \A k \in KEY :
+      Cardinality({getStartTs(w) : w \in Range(key_write[k])}) = Len(key_write[k])
+
 \* Snapshot isolation invariant should be preserved.
 SnapshotIsolation ==
   \A k \in KEY :

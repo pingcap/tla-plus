@@ -28,6 +28,8 @@
 <listEntry value="1LockConsistency"/>
 <listEntry value="1CommittedConsistency"/>
 <listEntry value="1AbortedConsistency"/>
+<listEntry value="1RollbackConsistency"/>
+<listEntry value="1UniqueWrite"/>
 <listEntry value="1SnapshotIsolation"/>
 </listAttribute>
 <listAttribute key="modelCorrectnessProperties"/>
