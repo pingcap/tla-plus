@@ -1,6 +1,6 @@
 --------------------------------- MODULE Test1 ---------------------------------
 
-EXTENDS Percolator, TLC
+EXTENDS ConcurrentPercolator, TLC
 
 \* We use one table with 3 keys and 3 concurrent clients for TLC model checking.
 \* These 3 clients have the same primary key, so they are considered symmetric.
