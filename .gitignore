@@ -1,4 +1,6 @@
 states/
 
+**/*.toolbox/*/
+**/*.toolbox/*___*_SnapShot_*.launch
 **/*.toolbox/.project
 **/*.toolbox/.settings/

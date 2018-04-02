@@ -9,6 +9,10 @@ ASSUME KEY # {} \* Keys cannot be empty.
 \* The set of clients to execute a transaction.
 CONSTANTS CLIENT
 
+\* Primary keys of all clients (transactions).
+CONSTANTS CLIENT_PRIMARY_KEY
+ASSUME CLIENT_PRIMARY_KEY \in [CLIENT -> KEY]
+
 \* $next_ts$ is the timestamp for transaction. It is increased monotonically,
 \* so every transaction must have a unique start and commit ts.
 VARIABLES next_ts
@@ -283,9 +287,9 @@ Next == \E c \in CLIENT : ClientOp(c)
 Init ==
   LET
     \* Selects a primary key and use the rest for the secondary keys.
-    chooseKey(ks) ==
+    chooseKey(ks, c) ==
     LET
-      primary == CHOOSE k \in ks : TRUE
+      primary == CLIENT_PRIMARY_KEY[c]
     IN
       [primary |-> primary,
        secondary |-> ks \ {primary},
@@ -294,7 +298,7 @@ Init ==
     /\ next_ts = 0
     /\ client_state = [c \in CLIENT |-> "init"]
     /\ client_ts = [c \in CLIENT |-> [start_ts |-> 0, commit_ts |-> 0]]
-    /\ client_key = [c \in CLIENT |-> chooseKey(KEY)]
+    /\ client_key = [c \in CLIENT |-> chooseKey(KEY, c)]
     /\ key_lock = [k \in KEY |-> {}]
     /\ key_data = [k \in KEY |-> {}]
     /\ key_write = [k \in KEY |-> <<>>]
@@ -438,10 +442,6 @@ UniqueWrite ==
 SnapshotIsolation ==
   \A k \in KEY :
     key_si[k] = TRUE
-
---------------------------------------------------------------------------------
-\* Used for symmetry reduction in TLC.
-Symmetry == Permutations(CLIENT)
 
 --------------------------------------------------------------------------------
 THEOREM Safety ==

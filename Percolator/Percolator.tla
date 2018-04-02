@@ -9,6 +9,7 @@ ASSUME KEY # {} \* Keys cannot be empty.
 \* The set of clients to execute a transaction.
 CONSTANTS CLIENT
 
+\* Primary keys of all clients (transactions).
 CONSTANTS CLIENT_PRIMARY_KEY
 ASSUME CLIENT_PRIMARY_KEY \in [CLIENT -> KEY]
 
