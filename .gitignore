@@ -1,0 +1,4 @@
+states/
+
+**/*.toolbox/.project
+**/*.toolbox/.settings/
