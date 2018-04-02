@@ -1,6 +1,6 @@
 --------------------------------- MODULE Test2 ---------------------------------
 
-EXTENDS Percolator, TLC
+EXTENDS ConcurrentPercolator, TLC
 
 \* We use one table with 2 keys and 2 concurrent clients for TLC model checking.
 \* These 2 clients have primary key 1 and 2 respectively.
