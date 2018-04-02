@@ -404,8 +404,6 @@ SnapshotIsolation ==
     key_si[k] = TRUE
 
 --------------------------------------------------------------------------------
-\* Used for symmetry reduction in TLC.
---------------------------------------------------------------------------------
 THEOREM Safety ==
   PercolatorSpec => [](/\ TypeInvariant
                        /\ WriteConsistency
