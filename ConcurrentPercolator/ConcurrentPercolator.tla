@@ -14,7 +14,7 @@ CONSTANTS CLIENT_PRIMARY_KEY
 ASSUME CLIENT_PRIMARY_KEY \in [CLIENT -> KEY]
 
 \* $next_ts$ is the timestamp for transaction. It is increased monotonically,
-\* so every transaction must have a unique start and commit ts.
+\* so every transaction must have a unique start ts.
 VARIABLES next_ts
 
 \* $client_state[c]$ is the state of client.
@@ -185,9 +185,12 @@ canLockKey(k, ts) ==
     /\ writes = {}       \* no any newer writes or rollbacks.
 
 \* Locks the key and places the data.
-lockKey(k, start_ts, primary) ==
+lockKey(c, k, start_ts, primary) ==
   /\ key_lock' = [key_lock EXCEPT ![k] = @ \union {[ts |-> start_ts, primary |-> primary]}]
   /\ key_data' = [key_data EXCEPT ![k] = @ \union {[ts |-> start_ts]}]
+  /\ IF client_ts[c].commit_ts < key_last_read_ts[k]
+     THEN client_ts' = [client_ts EXCEPT ![c].commit_ts = key_last_read_ts[k]]
+     ELSE UNCHANGED << client_ts >>
   /\ UNCHANGED <<key_write, key_last_read_ts, key_si>>
 
 \* Tries to lock primary key first, then the secondary key.
@@ -203,9 +206,9 @@ lock(c) ==
     \* ensures its correctness.
     \E k \in pending :
       /\ canLockKey(k, start_ts)
-      /\ lockKey(k, start_ts, primary)
+      /\ lockKey(c, k, start_ts, primary)
       /\ client_key' = [client_key EXCEPT ![c].pending = @ \ {k}]
-      /\ UNCHANGED <<client_state, client_ts>>
+      /\ UNCHANGED <<client_state>>
 
 \* Commits the primary key.
 commitPrimary(c) ==
@@ -229,7 +232,7 @@ Start(c) ==
   /\ client_state[c] = "init"
   /\ next_ts' = next_ts + 1
   /\ client_state' = [client_state EXCEPT ![c] = "working"]
-  /\ client_ts' = [client_ts EXCEPT ![c].start_ts = next_ts']
+  /\ client_ts' = [client_ts EXCEPT ![c] = [start_ts |-> next_ts', commit_ts |-> next_ts']]
   /\ UNCHANGED <<key_vars, client_key>>
 
 \* Does either one thing from these following threes.
@@ -251,10 +254,9 @@ Prewrite(c) ==
   /\ client_state[c] = "prewriting"
   /\ IF client_key[c].pending = {}
      THEN  \* all keys have been pre-written
-       /\ next_ts' = next_ts + 1
        /\ client_state' = [client_state EXCEPT ![c] = "committing"]
-       /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = next_ts']
-       /\ UNCHANGED <<key_vars, client_key>>
+       /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = client_ts[c].commit_ts + 1]
+       /\ UNCHANGED <<key_vars, client_key, next_ts>>
      ELSE
        /\ lock(c)
        /\ UNCHANGED <<next_ts>>
@@ -414,7 +416,7 @@ AbortedConsistency ==
     (/\ client_state[c] = "aborted"
      /\ client_ts[c].commit_ts # 0
     ) =>
-      findWriteWithCommitTS(client_key[c].primary, client_ts[c].commit_ts) = {}
+      findWriteWithStartTS(client_key[c].primary, client_ts[c].start_ts) = {}
 
 \* For each transaction, we cannot have both committed and rolled back keys.
 RollbackConsistency ==
