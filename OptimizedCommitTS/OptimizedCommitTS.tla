@@ -14,7 +14,7 @@ CONSTANTS CLIENT_PRIMARY_KEY
 ASSUME CLIENT_PRIMARY_KEY \in [CLIENT -> KEY]
 
 \* $next_ts$ is the timestamp for transaction. It is increased monotonically,
-\* so every transaction must have a unique start and commit ts.
+\* so every transaction must have a unique start ts.
 VARIABLES next_ts
 
 \* $client_state[c]$ is the state of client.
@@ -45,15 +45,15 @@ VARIABLES key_lock
 \* $ts$ denotes commit_ts; for "rollback" record, $ts$ denotes start_ts.
 VARIABLES key_write
 
-\* Two auxiliary variables for verifying snapshot isolation invariant. These
-\* variables should not appear in a real-world implementation.
-\*
 \* $key_last_read_ts[k]$ denotes the last read timestamp for key $k$, this
-\* should be monotonic.
-\*
+\* should be monotonic. It can be used to verfiy snapshot isolation invariant
+\* and cacluate commit ts. In a real-world implementation, each region will have
+\* one $region_last_read_ts$.
+VARIABLES key_last_read_ts
+
 \* $key_si[k]$ denotes if the snapshot isolation invariant is preserved for
-\* key $k$ so far.
-VARIABLES key_last_read_ts, key_si
+\* key $k$ so far. This will not appear in a real-world implementation.
+VARIABLES key_si
 
 client_vars == <<client_state, client_ts, client_key>>
 key_vars == <<key_data, key_lock, key_write, key_last_read_ts, key_si>>
@@ -62,6 +62,8 @@ vars == <<next_ts, client_vars, key_vars>>
 --------------------------------------------------------------------------------
 Range(m) ==
   {m[i] : i \in DOMAIN m}
+
+Max(a, b) == IF a < b THEN b ELSE a
 
 --------------------------------------------------------------------------------
 \* Checks whether there is a lock of key $k$, whose $ts$ is less or equal than
@@ -185,9 +187,10 @@ canLockKey(k, ts) ==
     /\ writes = {}       \* no any newer writes or rollbacks.
 
 \* Locks the key and places the data.
-lockKey(k, start_ts, primary) ==
+lockKey(c, k, start_ts, primary) ==
   /\ key_lock' = [key_lock EXCEPT ![k] = @ \union {[ts |-> start_ts, primary |-> primary]}]
   /\ key_data' = [key_data EXCEPT ![k] = @ \union {[ts |-> start_ts]}]
+  /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = Max(client_ts[c].commit_ts, key_last_read_ts[k])]
   /\ UNCHANGED <<key_write, key_last_read_ts, key_si>>
 
 \* Tries to lock primary key first, then the secondary key.
@@ -203,9 +206,9 @@ lock(c) ==
     \* ensures its correctness.
     \E k \in pending :
       /\ canLockKey(k, start_ts)
-      /\ lockKey(k, start_ts, primary)
+      /\ lockKey(c, k, start_ts, primary)
       /\ client_key' = [client_key EXCEPT ![c].pending = @ \ {k}]
-      /\ UNCHANGED <<client_state, client_ts>>
+      /\ UNCHANGED <<client_state>>
 
 \* Commits the primary key.
 commitPrimary(c) ==
@@ -229,7 +232,7 @@ Start(c) ==
   /\ client_state[c] = "init"
   /\ next_ts' = next_ts + 1
   /\ client_state' = [client_state EXCEPT ![c] = "working"]
-  /\ client_ts' = [client_ts EXCEPT ![c].start_ts = next_ts']
+  /\ client_ts' = [client_ts EXCEPT ![c] = [start_ts |-> next_ts', commit_ts |-> next_ts']]
   /\ UNCHANGED <<key_vars, client_key>>
 
 \* Does either one thing from these following threes.
@@ -251,10 +254,11 @@ Prewrite(c) ==
   /\ client_state[c] = "prewriting"
   /\ IF client_key[c].pending = {}
      THEN  \* all keys have been pre-written
-       /\ next_ts' = next_ts + 1
        /\ client_state' = [client_state EXCEPT ![c] = "committing"]
-       /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = next_ts']
-       /\ UNCHANGED <<key_vars, client_key>>
+       \* The commit_ts is set to start_ts at first, then updated at every prewrite,
+       \* and finally increased by 1.
+       /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = client_ts[c].commit_ts + 1]
+       /\ UNCHANGED <<key_vars, client_key, next_ts>>
      ELSE
        /\ lock(c)
        /\ UNCHANGED <<next_ts>>
@@ -414,7 +418,7 @@ AbortedConsistency ==
     (/\ client_state[c] = "aborted"
      /\ client_ts[c].commit_ts # 0
     ) =>
-      findWriteWithCommitTS(client_key[c].primary, client_ts[c].commit_ts) = {}
+      findWriteWithStartTS(client_key[c].primary, client_ts[c].start_ts) = {}
 
 \* For each transaction, we cannot have both committed and rolled back keys.
 RollbackConsistency ==
