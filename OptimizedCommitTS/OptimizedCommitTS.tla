@@ -20,7 +20,9 @@ VARIABLES next_ts
 \* $client_state[c]$ is the state of client.
 VARIABLES client_state
 
-\* $client_ts[c]$ is a record of [start_ts: ts, commit_ts: ts].
+\* $client_ts[c]$ is a record of [start_ts: ts, commit_ts: ts]. 
+\* The $commit_ts$ is set to $start_ts$ at first, then updated at every prewrite,
+\* and finally increased by 1.
 VARIABLES client_ts
 
 \* $client_key[c]$ is a record of [primary: key, secondary: {key},
@@ -47,7 +49,7 @@ VARIABLES key_write
 
 \* $key_last_read_ts[k]$ denotes the last read timestamp for key $k$, this
 \* should be monotonic. It can be used to verfiy snapshot isolation invariant
-\* and cacluate commit ts. In a real-world implementation, each region will have
+\* and calculate commit ts. In a real-world implementation, each region will have
 \* one $region_last_read_ts$.
 VARIABLES key_last_read_ts
 
@@ -255,8 +257,6 @@ Prewrite(c) ==
   /\ IF client_key[c].pending = {}
      THEN  \* all keys have been pre-written
        /\ client_state' = [client_state EXCEPT ![c] = "committing"]
-       \* The commit_ts is set to start_ts at first, then updated at every prewrite,
-       \* and finally increased by 1.
        /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = client_ts[c].commit_ts + 1]
        /\ UNCHANGED <<key_vars, client_key, next_ts>>
      ELSE
