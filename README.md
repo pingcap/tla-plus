@@ -4,7 +4,7 @@ TLA+ is a formal specification and verification language to help engineers desig
 
 # tla-plus in TiDB
 
-In TiDB, we use TLA+ for the following purposes:
+In [TiDB](https://github.com/pingcap/tidb), we use TLA+ for the following purposes:
 
 - To verify the distributed consensus algorithm - [Raft](https://github.com/pingcap/raft-rs). 
 - To verify the implementation of distributed transaction.
