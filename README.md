@@ -1,8 +1,10 @@
-# tla-plus
+# TLA+ in TiDB
+
+## About TLA+
 
 TLA+ is a formal specification and verification language to help engineers design, specify, reason about, and verify complex software and hardware systems. It is widely used to verify the algorithms in distributed systems.
 
-# tla-plus in TiDB
+## Using TLA+ in TiDB
 
 In [TiDB](https://github.com/pingcap/tidb), we use TLA+ for the following purposes:
 
