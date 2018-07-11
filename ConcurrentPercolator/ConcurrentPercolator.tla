@@ -61,7 +61,7 @@ vars == <<next_ts, client_vars, key_vars>>
 
 --------------------------------------------------------------------------------
 Range(m) ==
-  {m[i] : i \in DOMAIN m}
+  {m[i] : i \in DOMAIN m}  
 
 --------------------------------------------------------------------------------
 \* Checks whether there is a lock of key $k$, whose $ts$ is less or equal than
@@ -74,7 +74,7 @@ hasLockEQ(k, ts) ==
   \E l \in key_lock[k] : l.ts = ts
 
 \* Returns TRUE if a lock can be cleanup up.
-\* A lock can be cleaned up iff its ts is less than or equal to $ts$.
+\* A lock can be cleaned up if its ts is less than or equal to $ts$.
 isStaleLock(l, ts) ==
   l.ts <= ts
 
@@ -84,8 +84,8 @@ hasStaleLock(k, ts) ==
 
 \* Returns the writes with start_ts equals to $ts$.
 findWriteWithStartTS(k, ts) ==
-  {w \in Range(key_write[k]) : (w.type = "write" /\ w.start_ts = ts)}
-
+  {w \in Range(key_write[k]) : (w.type = "write" /\ w.start_ts = ts)}      
+   
 \* Returns the writes with commit_ts equals to $ts$.
 findWriteWithCommitTS(k, ts) ==
   {w \in Range(key_write[k]) : (w.type = "write" /\ w.ts = ts)}
@@ -102,8 +102,41 @@ checkSnapshotIsolation(k, commit_ts) ==
   THEN
     key_si' = [key_si EXCEPT ![k] = FALSE]
   ELSE
-    UNCHANGED <<key_si>>
+    UNCHANGED <<key_si>> 
 
+\* Returns index of $e$ in $seq$ 
+getIndex(seq, e) == CHOOSE n \in DOMAIN seq : seq[n] = e  
+
+\* Returns the value whose $ts$ is the max in all values
+getWriteWithMaxTS(w) == CHOOSE x \in w : \A y \in w : x.ts >= y.ts
+
+\* Returns the writes with ts less or equal than $ts$ 
+findWriteLessEqualTS(kw, ts) ==
+  {w \in Range(kw) : (w.ts <= ts)}  
+
+\* Deletes element whose index equal to $index$ from $seq$
+deleteElement(seq, index)==
+  [i \in 1..(Len(seq)-1)|->IF i<index THEN seq[i]ELSE seq[(i+1)]]
+
+\* Removes the pre rollback, whose ts is less or equal than $ts$.
+collapsePreRollback(w, ts) == 
+  LET 
+     writes == findWriteLessEqualTS(w, ts)
+  IN 
+     IF writes = {} 
+     THEN 
+       w
+     ELSE 
+       LET 
+            maxTsWrite == getWriteWithMaxTS(writes)
+            index == getIndex(w, maxTsWrite) 
+         IN 
+            IF w[index].type = "rollback"
+            THEN 
+                deleteElement(w, index)
+            ELSE 
+                w
+    
 \* Cleans up a stale lock and its data.
 \* If the lock is a secondary lock, and the assoicated primary lock is cleaned
 \* up, we can clean up the lock and do,
@@ -115,8 +148,7 @@ cleanupStaleLock(k, ts) ==
     eraseLock(key, l) ==
       /\ key_data' = [key_data EXCEPT ![key] = @ \ {[ts |-> l.ts]}]
       /\ key_lock' = [key_lock EXCEPT ![key] = @ \ {l}]
-      /\ key_write' = [key_write EXCEPT ![key] =
-                         Append(@, [ts |-> l.ts, type |-> "rollback"])]
+      /\ key_write' = [key_write EXCEPT ![key] = Append(collapsePreRollback(@, l.ts), [ts |-> l.ts, type |-> "rollback"])]
   IN
     \E l \in key_lock[k] :
       /\ isStaleLock(l, ts)
