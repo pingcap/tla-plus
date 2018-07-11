@@ -64,8 +64,7 @@ Range(m) ==
   {m[i] : i \in DOMAIN m}  
 
 --------------------------------------------------------------------------------
-\* Checks whether there is a lock of key $k$, whose $ts$ is less or equal than
-\* $ts$.
+\* Checks whether there is a lock of key $k$, whose $ts$ is less than or equal to $ts$.
 hasLockLE(k, ts) ==
   \E l \in key_lock[k] : l.ts <= ts
 
@@ -107,18 +106,18 @@ checkSnapshotIsolation(k, commit_ts) ==
 \* Returns index of $e$ in $seq$ 
 getIndex(seq, e) == CHOOSE n \in DOMAIN seq : seq[n] = e  
 
-\* Returns the value whose $ts$ is the max in all values
+\* Returns the write whose $ts$ is largest
 getWriteWithMaxTS(w) == CHOOSE x \in w : \A y \in w : x.ts >= y.ts
 
 \* Returns the writes with ts less or equal than $ts$ 
 findWriteLessEqualTS(kw, ts) ==
   {w \in Range(kw) : (w.ts <= ts)}  
 
-\* Deletes element whose index equal to $index$ from $seq$
+\* Deletes element whose index in $seq$ equal to $index$
 deleteElement(seq, index)==
   [i \in 1..(Len(seq)-1)|->IF i<index THEN seq[i]ELSE seq[(i+1)]]
 
-\* Removes the pre rollback, whose ts is less or equal than $ts$.
+\* Removes the pre rollback, whose ts is less than or equal to $ts$.
 collapsePreRollback(w, ts) == 
   LET 
      writes == findWriteLessEqualTS(w, ts)
