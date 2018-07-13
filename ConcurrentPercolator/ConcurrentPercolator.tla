@@ -61,7 +61,7 @@ vars == <<next_ts, client_vars, key_vars>>
 
 --------------------------------------------------------------------------------
 Range(m) ==
-  {m[i] : i \in DOMAIN m}  
+  {m[i] : i \in DOMAIN m}
 
 --------------------------------------------------------------------------------
 \* Checks whether there is a lock of key $k$, whose $ts$ is less than or equal to $ts$.
@@ -89,7 +89,7 @@ findWriteWithStartTS(k, ts) ==
 findWriteWithCommitTS(k, ts) ==
   {w \in Range(key_write[k]) : (w.type = "write" /\ w.ts = ts)}
 
-\* Returns TRUE if there is a rollback for key $k$ at timestamp $ts$.
+\* Returns TRUE if there is a rollback for key $k$ that is not deleted logically at timestamp $ts$.
 hasRollback(k, ts) ==
   {r \in Range(key_write[k]) : (r.type = "rollback" /\ r.is_deleted = FALSE /\ r.ts = ts )} # {}
 
@@ -115,40 +115,29 @@ checkSnapshotIsolation(k, commit_ts) ==
   THEN
     key_si' = [key_si EXCEPT ![k] = FALSE]
   ELSE
-    UNCHANGED <<key_si>> 
+    UNCHANGED <<key_si>>
 
-\* Returns index of $e$ in $seq$ 
-getIndex(seq, e) == CHOOSE n \in DOMAIN seq : seq[n] = e  
-
-\* Returns the write whose $ts$ is largest
-getWriteWithMaxTS(w) == CHOOSE x \in w : \A y \in w : x.ts >= y.ts
-
-\* Returns the writes with ts less or equal than $ts$ 
-findWriteLessEqualTS(kw, ts) ==
-  {w \in Range(kw) : (w.ts <= ts /\ IF (w.type = "rollback" /\ w.is_deleted = TRUE) THEN FALSE ELSE TRUE)}
+\* Returns the index of the first write with ts less or equal than $ts$
+getWritesLessEqualTS(ws, ts) == SelectSeq(ws, LAMBDA w: (w.ts <= ts /\ w.is_deleted = FALSE))
 
 \* Logical deletes element whose index in $seq$ equal to $index$
-logicalDeleteElement(seq, index)==
-  [i \in 1..Len(seq)|->IF i<index THEN seq[i] ELSE [ts |-> seq[i].ts, type |-> seq[i].type, is_deleted |-> TRUE]]
+logicalDeleteElement(seq, e)==
+  [i \in 1..Len(seq)|->IF seq[i] # e THEN seq[i] ELSE [ts |-> seq[i].ts, type |-> seq[i].type, is_deleted |-> TRUE]]
 
 \* Removes the pre rollback, whose ts is less than or equal to $ts$.
-collapsePreRollback(w, ts) == 
-  LET 
-     writes == findWriteLessEqualTS(w, ts)
-  IN 
-     IF writes = {} 
-     THEN 
+collapsePreRollback(w, ts) ==
+  IF Len(w) > 0
+  THEN
+      LET
+         writes == getWritesLessEqualTS(w, ts)
+      IN
+         IF Len(writes) > 0 /\ writes[Len(writes)].type = "rollback"
+         THEN
+             logicalDeleteElement(w, writes[Len(writes)])
+         ELSE
+             w
+   ELSE
        w
-     ELSE 
-       LET 
-            maxTsWrite == getWriteWithMaxTS(writes)
-            index == getIndex(w, maxTsWrite) 
-         IN 
-            IF w[index].type = "rollback"
-            THEN 
-                logicalDeleteElement(w, index)
-            ELSE 
-                w
 
 \* Writes rollback record to key write.
 \* If the rollback with the ts equal to $ts$ exists and is marked as deleted,
@@ -273,7 +262,8 @@ commitPrimary(c) ==
     /\ key_write' = [key_write EXCEPT ![primary] =
                       Append(@, [ts |-> commit_ts,
                                  type |-> "write",
-                                 start_ts |-> start_ts])]
+                                 start_ts |-> start_ts,
+                                 is_deleted |-> FALSE])]
     /\ key_lock' = [key_lock EXCEPT ![primary] = @ \ {[ts |-> start_ts,
                                                        primary |-> primary]}]
     /\ checkSnapshotIsolation(primary, commit_ts)
@@ -385,7 +375,7 @@ KeyLockTypeInv ==
   key_lock \in [KEY -> SUBSET [ts : Nat, primary : KEY]]
 
 KeyWriteTypeInv ==
-  key_write \in [KEY -> Seq([ts : Nat, type : {"write"}, start_ts : Nat] \union
+  key_write \in [KEY -> Seq([ts : Nat, type : {"write"}, start_ts : Nat, is_deleted: BOOLEAN] \union
                             [ts : Nat, type : {"rollback"}, is_deleted: BOOLEAN])
                 ]
 
@@ -442,7 +432,7 @@ CommittedConsistency ==
       commit_ts == client_ts[c].commit_ts
       primary == client_key[c].primary
       secondary == client_key[c].secondary
-      w == [ts |-> commit_ts, type |-> "write", start_ts |-> start_ts]
+      w == [ts |-> commit_ts, type |-> "write", start_ts |-> start_ts, is_deleted |-> FALSE]
     IN
       client_state[c] = "committed" =>
         \* The primary key lock must be cleaned up, and no any older lock.
