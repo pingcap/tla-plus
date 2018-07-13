@@ -73,7 +73,7 @@ hasLockEQ(k, ts) ==
   \E l \in key_lock[k] : l.ts = ts
 
 \* Returns TRUE if a lock can be cleanup up.
-\* A lock can be cleaned up if its ts is less than or equal to $ts$.
+\* A lock can be cleaned up iff its ts is less than or equal to $ts$.
 isStaleLock(l, ts) ==
   l.ts <= ts
 
@@ -91,7 +91,21 @@ findWriteWithCommitTS(k, ts) ==
 
 \* Returns TRUE if there is a rollback for key $k$ at timestamp $ts$.
 hasRollback(k, ts) ==
+  {r \in Range(key_write[k]) : (r.type = "rollback" /\ r.is_deleted = FALSE /\ r.ts = ts )} # {}
+
+\* Returns TRUE if there is a rollback for key $k$ at timestamp $ts$
+hasRollbackIgnoreDeleted(k, ts) ==
   {r \in Range(key_write[k]) : (r.type = "rollback" /\ r.ts = ts)} # {}
+
+\* Returns TRUE if the write is rollback with ts equal to $ts$
+\* and this rollback is marked as deleted.
+isRollbackWithDeleted(w, ts) ==
+  (w.type = "rollback" /\ w.ts = ts /\ w.is_deleted = TRUE)
+
+\* Returns TRUE if there is a rollback at timestamp $ts$
+\* and this rollback is marked as deleted.
+hasRollbackWithDeleted(ws, ts) ==
+  {r \in Range(ws) : isRollbackWithDeleted(r, ts)} # {}
 
 \* Updates $key_si$ for key $k$. If a new version of key $k$ is committed with
 \* $commit_ts$ < last read timestamp, consider the snapshot isolation invariant
@@ -111,11 +125,11 @@ getWriteWithMaxTS(w) == CHOOSE x \in w : \A y \in w : x.ts >= y.ts
 
 \* Returns the writes with ts less or equal than $ts$ 
 findWriteLessEqualTS(kw, ts) ==
-  {w \in Range(kw) : (w.ts <= ts)}  
+  {w \in Range(kw) : (w.ts <= ts /\ IF (w.type = "rollback" /\ w.is_deleted = TRUE) THEN FALSE ELSE TRUE)}
 
-\* Deletes element whose index in $seq$ equal to $index$
-deleteElement(seq, index)==
-  [i \in 1..(Len(seq)-1)|->IF i<index THEN seq[i]ELSE seq[(i+1)]]
+\* Logical deletes element whose index in $seq$ equal to $index$
+logicalDeleteElement(seq, index)==
+  [i \in 1..Len(seq)|->IF i<index THEN seq[i] ELSE [ts |-> seq[i].ts, type |-> seq[i].type, is_deleted |-> TRUE]]
 
 \* Removes the pre rollback, whose ts is less than or equal to $ts$.
 collapsePreRollback(w, ts) == 
@@ -132,9 +146,19 @@ collapsePreRollback(w, ts) ==
          IN 
             IF w[index].type = "rollback"
             THEN 
-                deleteElement(w, index)
+                logicalDeleteElement(w, index)
             ELSE 
                 w
+
+\* Writes rollback record to key write.
+\* If the rollback with the ts equal to $ts$ exists and is marked as deleted,
+\* which will be overwritten by the new rollback.
+writeRollback(ws, ts) ==
+  IF hasRollbackWithDeleted(ws, ts)
+  THEN
+     [i \in 1..Len(ws)|->IF isRollbackWithDeleted(ws[i], ts) THEN ws[i] ELSE [ts |-> ws[i].ts, type |-> ws[i].type, is_deleted |-> TRUE]]
+  ELSE
+     Append(collapsePreRollback(ws, ts), [ts |-> ts, type |-> "rollback", is_deleted |-> FALSE])
     
 \* Cleans up a stale lock and its data.
 \* If the lock is a secondary lock, and the assoicated primary lock is cleaned
@@ -147,7 +171,7 @@ cleanupStaleLock(k, ts) ==
     eraseLock(key, l) ==
       /\ key_data' = [key_data EXCEPT ![key] = @ \ {[ts |-> l.ts]}]
       /\ key_lock' = [key_lock EXCEPT ![key] = @ \ {l}]
-      /\ key_write' = [key_write EXCEPT ![key] = Append(collapsePreRollback(@, l.ts), [ts |-> l.ts, type |-> "rollback"])]
+      /\ key_write' = [key_write EXCEPT ![key] = writeRollback(key_write[key], l.ts)]
   IN
     \E l \in key_lock[k] :
       /\ isStaleLock(l, ts)
@@ -362,7 +386,7 @@ KeyLockTypeInv ==
 
 KeyWriteTypeInv ==
   key_write \in [KEY -> Seq([ts : Nat, type : {"write"}, start_ts : Nat] \union
-                            [ts : Nat, type : {"rollback"}])
+                            [ts : Nat, type : {"rollback"}, is_deleted: BOOLEAN])
                 ]
 
 KeyLastReadTsTypeInv ==
@@ -453,7 +477,7 @@ RollbackConsistency ==
     LET
       start_ts == client_ts[c].start_ts
       hasWriteKey == \E k \in KEY : findWriteWithStartTS(k, start_ts) # {}
-      hasRollbackKey == \E k \in KEY : hasRollback(k, start_ts)
+      hasRollbackKey == \E k \in KEY : hasRollbackIgnoreDeleted(k, start_ts)
     IN
       start_ts > 0 => ~ (hasWriteKey /\ hasRollbackKey)
 
