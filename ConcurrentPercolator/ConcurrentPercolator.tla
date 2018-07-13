@@ -83,8 +83,8 @@ hasStaleLock(k, ts) ==
 
 \* Returns the writes with start_ts equals to $ts$.
 findWriteWithStartTS(k, ts) ==
-  {w \in Range(key_write[k]) : (w.type = "write" /\ w.start_ts = ts)}      
-   
+  {w \in Range(key_write[k]) : (w.type = "write" /\ w.start_ts = ts)}
+
 \* Returns the writes with commit_ts equals to $ts$.
 findWriteWithCommitTS(k, ts) ==
   {w \in Range(key_write[k]) : (w.type = "write" /\ w.ts = ts)}
