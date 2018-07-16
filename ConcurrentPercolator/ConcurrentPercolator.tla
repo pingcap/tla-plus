@@ -90,11 +90,11 @@ findWriteWithCommitTS(k, ts) ==
   {w \in Range(key_write[k]) : (w.type = "write" /\ w.ts = ts)}
 
 \* Returns TRUE if there is a rollback for key $k$ that is not deleted logically at timestamp $ts$.
-hasRollback(k, ts) ==
+hasRollbackNotDeleted(k, ts) ==
   {r \in Range(key_write[k]) : (r.type = "rollback" /\ r.is_deleted = FALSE /\ r.ts = ts )} # {}
 
 \* Returns TRUE if there is a rollback for key $k$ at timestamp $ts$
-hasRollbackIgnoreDeleted(k, ts) ==
+hasRollback(k, ts) ==
   {r \in Range(key_write[k]) : (r.type = "rollback" /\ r.ts = ts)} # {}
 
 \* Returns TRUE if the write is rollback with ts equal to $ts$
@@ -120,7 +120,7 @@ checkSnapshotIsolation(k, commit_ts) ==
 \* Returns the index of the first write with ts less or equal than $ts$
 getWritesLessEqualTS(ws, ts) == SelectSeq(ws, LAMBDA w: (w.ts <= ts /\ w.is_deleted = FALSE))
 
-\* Logical deletes element whose index in $seq$ equal to $index$
+\* Deletes element from $seq$ logically
 logicalDeleteElement(seq, e)==
   [i \in 1..Len(seq)|->IF seq[i] # e THEN seq[i] ELSE [ts |-> seq[i].ts, type |-> seq[i].type, is_deleted |-> TRUE]]
 
@@ -178,7 +178,7 @@ cleanupStaleLock(k, ts) ==
                     \* the primary key is not committed, clean up the data.
                     \* Note we should always clean up the corresponding primary
                     \* lock first, then this secondary lock.
-                    IF hasRollback(l.primary, l.ts) = FALSE
+                    IF hasRollbackNotDeleted(l.primary, l.ts) = FALSE
                     THEN
                       /\ eraseLock(l.primary, l)
                       /\ UNCHANGED <<key_si>>
@@ -467,7 +467,7 @@ RollbackConsistency ==
     LET
       start_ts == client_ts[c].start_ts
       hasWriteKey == \E k \in KEY : findWriteWithStartTS(k, start_ts) # {}
-      hasRollbackKey == \E k \in KEY : hasRollbackIgnoreDeleted(k, start_ts)
+      hasRollbackKey == \E k \in KEY : hasRollback(k, start_ts)
     IN
       start_ts > 0 => ~ (hasWriteKey /\ hasRollbackKey)
 
