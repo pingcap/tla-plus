@@ -117,8 +117,12 @@ checkSnapshotIsolation(k, commit_ts) ==
   ELSE
     UNCHANGED <<key_si>>
 
-\* Returns the index of the first write with ts less or equal than $ts$
-getWritesLessEqualTS(ws, ts) == SelectSeq(ws, LAMBDA w: (w.ts <= ts /\ w.is_deleted = FALSE))
+\* Returns the writes with ts less than or equal to $ts$ and is not deleted logically
+findWriteLessEqualTS(kw, ts) ==
+  {w \in Range(kw) : (w.ts <= ts /\ w.is_deleted = FALSE)}
+
+\* Returns the write whose $ts$ is the max in all writes
+getWriteWithMaxTS(w) == CHOOSE x \in w : \A y \in w : x.ts >= y.ts
 
 \* Deletes element from $seq$ logically
 logicalDeleteElement(seq, e)==
@@ -126,18 +130,21 @@ logicalDeleteElement(seq, e)==
 
 \* Removes the pre rollback, whose ts is less than or equal to $ts$.
 collapsePreRollback(w, ts) ==
-  IF Len(w) > 0
-  THEN
-      LET
-         writes == getWritesLessEqualTS(w, ts)
-      IN
-         IF Len(writes) > 0 /\ writes[Len(writes)].type = "rollback"
-         THEN
-             logicalDeleteElement(w, writes[Len(writes)])
-         ELSE
-             w
-   ELSE
-       w
+   LET
+      writes == findWriteLessEqualTS(w, ts)
+   IN
+      IF writes # {}
+      THEN
+          LET
+             maxTsWrite == getWriteWithMaxTS(writes)
+          IN
+             IF maxTsWrite.type = "rollback"
+             THEN
+                 logicalDeleteElement(w, maxTsWrite)
+             ELSE
+                 w
+      ELSE
+          w
 
 \* Writes rollback record to key write.
 \* If the rollback with the ts equal to $ts$ exists and is marked as deleted,
