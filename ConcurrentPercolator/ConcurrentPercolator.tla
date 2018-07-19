@@ -152,7 +152,7 @@ collapsePreRollback(w, ts) ==
 writeRollback(ws, ts) ==
   IF hasRollbackWithDeleted(ws, ts)
   THEN
-     [i \in 1..Len(ws)|->IF isRollbackWithDeleted(ws[i], ts) THEN ws[i] ELSE [ts |-> ws[i].ts, type |-> ws[i].type, is_deleted |-> TRUE]]
+     [i \in 1..Len(ws)|->IF isRollbackWithDeleted(ws[i], ts) THEN ws[i] ELSE [ts |-> ws[i].ts, type |-> ws[i].type, is_deleted |-> FALSE]]
   ELSE
      Append(collapsePreRollback(ws, ts), [ts |-> ts, type |-> "rollback", is_deleted |-> FALSE])
     
