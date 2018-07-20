@@ -64,8 +64,7 @@ Range(m) ==
   {m[i] : i \in DOMAIN m}
 
 --------------------------------------------------------------------------------
-\* Checks whether there is a lock of key $k$, whose $ts$ is less or equal than
-\* $ts$.
+\* Checks whether there is a lock of key $k$, whose $ts$ is less than or equal to $ts$.
 hasLockLE(k, ts) ==
   \E l \in key_lock[k] : l.ts <= ts
 
@@ -90,9 +89,23 @@ findWriteWithStartTS(k, ts) ==
 findWriteWithCommitTS(k, ts) ==
   {w \in Range(key_write[k]) : (w.type = "write" /\ w.ts = ts)}
 
-\* Returns TRUE if there is a rollback for key $k$ at timestamp $ts$.
+\* Returns TRUE if there is a rollback for key $k$ that is not deleted logically at timestamp $ts$.
+hasRollbackNotDeleted(k, ts) ==
+  {r \in Range(key_write[k]) : (r.type = "rollback" /\ r.is_deleted = FALSE /\ r.ts = ts )} # {}
+
+\* Returns TRUE if there is a rollback for key $k$ at timestamp $ts$
 hasRollback(k, ts) ==
   {r \in Range(key_write[k]) : (r.type = "rollback" /\ r.ts = ts)} # {}
+
+\* Returns TRUE if the write is rollback with ts equal to $ts$
+\* and this rollback is marked as deleted.
+isRollbackWithDeleted(w, ts) ==
+  (w.type = "rollback" /\ w.ts = ts /\ w.is_deleted = TRUE)
+
+\* Returns TRUE if there is a rollback at timestamp $ts$
+\* and this rollback is marked as deleted.
+hasRollbackWithDeleted(ws, ts) ==
+  {r \in Range(ws) : isRollbackWithDeleted(r, ts)} # {}
 
 \* Updates $key_si$ for key $k$. If a new version of key $k$ is committed with
 \* $commit_ts$ < last read timestamp, consider the snapshot isolation invariant
@@ -104,6 +117,45 @@ checkSnapshotIsolation(k, commit_ts) ==
   ELSE
     UNCHANGED <<key_si>>
 
+\* Returns the writes with ts less than or equal to $ts$ and is not deleted logically
+findWriteLessEqualTS(kw, ts) ==
+  {w \in Range(kw) : (w.ts <= ts /\ w.is_deleted = FALSE)}
+
+\* Returns the write whose $ts$ is the max in all writes
+getWriteWithMaxTS(w) == CHOOSE x \in w : \A y \in w : x.ts >= y.ts
+
+\* Deletes element from $seq$ logically
+logicalDeleteElement(seq, e)==
+  [i \in 1..Len(seq)|->IF seq[i] # e THEN seq[i] ELSE [ts |-> seq[i].ts, type |-> seq[i].type, is_deleted |-> TRUE]]
+
+\* Removes the pre rollback, whose ts is less than or equal to $ts$.
+collapsePreRollback(w, ts) ==
+   LET
+      writes == findWriteLessEqualTS(w, ts)
+   IN
+      IF writes # {}
+      THEN
+          LET
+             maxTsWrite == getWriteWithMaxTS(writes)
+          IN
+             IF maxTsWrite.type = "rollback"
+             THEN
+                 logicalDeleteElement(w, maxTsWrite)
+             ELSE
+                 w
+      ELSE
+          w
+
+\* Writes rollback record to key write.
+\* If the rollback with the ts equal to $ts$ exists and is marked as deleted,
+\* which will be overwritten by the new rollback.
+writeRollback(ws, ts) ==
+  IF hasRollbackWithDeleted(ws, ts)
+  THEN
+     [i \in 1..Len(ws)|->IF isRollbackWithDeleted(ws[i], ts) THEN ws[i] ELSE [ts |-> ws[i].ts, type |-> ws[i].type, is_deleted |-> FALSE]]
+  ELSE
+     Append(collapsePreRollback(ws, ts), [ts |-> ts, type |-> "rollback", is_deleted |-> FALSE])
+    
 \* Cleans up a stale lock and its data.
 \* If the lock is a secondary lock, and the assoicated primary lock is cleaned
 \* up, we can clean up the lock and do,
@@ -115,8 +167,7 @@ cleanupStaleLock(k, ts) ==
     eraseLock(key, l) ==
       /\ key_data' = [key_data EXCEPT ![key] = @ \ {[ts |-> l.ts]}]
       /\ key_lock' = [key_lock EXCEPT ![key] = @ \ {l}]
-      /\ key_write' = [key_write EXCEPT ![key] =
-                         Append(@, [ts |-> l.ts, type |-> "rollback"])]
+      /\ key_write' = [key_write EXCEPT ![key] = writeRollback(key_write[key], l.ts)]
   IN
     \E l \in key_lock[k] :
       /\ isStaleLock(l, ts)
@@ -134,7 +185,7 @@ cleanupStaleLock(k, ts) ==
                     \* the primary key is not committed, clean up the data.
                     \* Note we should always clean up the corresponding primary
                     \* lock first, then this secondary lock.
-                    IF hasRollback(l.primary, l.ts) = FALSE
+                    IF hasRollbackNotDeleted(l.primary, l.ts) = FALSE
                     THEN
                       /\ eraseLock(l.primary, l)
                       /\ UNCHANGED <<key_si>>
@@ -218,7 +269,8 @@ commitPrimary(c) ==
     /\ key_write' = [key_write EXCEPT ![primary] =
                       Append(@, [ts |-> commit_ts,
                                  type |-> "write",
-                                 start_ts |-> start_ts])]
+                                 start_ts |-> start_ts,
+                                 is_deleted |-> FALSE])]
     /\ key_lock' = [key_lock EXCEPT ![primary] = @ \ {[ts |-> start_ts,
                                                        primary |-> primary]}]
     /\ checkSnapshotIsolation(primary, commit_ts)
@@ -330,8 +382,8 @@ KeyLockTypeInv ==
   key_lock \in [KEY -> SUBSET [ts : Nat, primary : KEY]]
 
 KeyWriteTypeInv ==
-  key_write \in [KEY -> Seq([ts : Nat, type : {"write"}, start_ts : Nat] \union
-                            [ts : Nat, type : {"rollback"}])
+  key_write \in [KEY -> Seq([ts : Nat, type : {"write"}, start_ts : Nat, is_deleted: BOOLEAN] \union
+                            [ts : Nat, type : {"rollback"}, is_deleted: BOOLEAN])
                 ]
 
 KeyLastReadTsTypeInv ==
@@ -387,7 +439,7 @@ CommittedConsistency ==
       commit_ts == client_ts[c].commit_ts
       primary == client_key[c].primary
       secondary == client_key[c].secondary
-      w == [ts |-> commit_ts, type |-> "write", start_ts |-> start_ts]
+      w == [ts |-> commit_ts, type |-> "write", start_ts |-> start_ts, is_deleted |-> FALSE]
     IN
       client_state[c] = "committed" =>
         \* The primary key lock must be cleaned up, and no any older lock.
