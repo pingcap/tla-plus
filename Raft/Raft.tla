@@ -354,7 +354,8 @@ HandleAppendEntriesRequest(i, j, m) ==
              /\ LET index == m.mprevLogIndex + 1
                 IN \/ \* already done with request
                        /\ \/ m.mentries = << >>
-                          \/ /\ Len(log[i]) >= index
+                          \/ m.mentries /= << >>
+                             /\ Len(log[i]) >= index
                              /\ log[i][index].term = m.mentries[1].term
                           \* This could make our commitIndex decrease (for
                           \* example if we process an old, duplicated request),
@@ -369,7 +370,7 @@ HandleAppendEntriesRequest(i, j, m) ==
                                  msource         |-> i,
                                  mdest           |-> j],
                                  m)
-                       /\ UNCHANGED <<serverVars, logVars>>
+                       /\ UNCHANGED <<serverVars, log>>
                    \/ \* conflict: remove 1 entry
                        /\ m.mentries /= << >>
                        /\ Len(log[i]) >= index
@@ -466,4 +467,9 @@ Next == /\ \/ \E i \in Server : Restart(i)
 \* to Next.
 Spec == Init /\ [][Next]_vars
 
+\* The following are a set of verification.
+
+MoreThanOneLeader ==
+   Cardinality({i \in Server: state[i]=Leader}) <= 1
+ 
 ===============================================================================
