@@ -8,10 +8,11 @@
 EXTENDS Naturals, FiniteSets, Sequences, TLC
 
 \* The set of server IDs
-CONSTANTS Server
+CONSTANTS ChangeServer, Server
 
 \* The set of requests that can go into the log
 CONSTANTS Value
+CONSTANTS ValueEntry,ConfigEntry
 
 \* Server states.
 CONSTANTS Follower, Candidate, Leader
@@ -21,7 +22,9 @@ CONSTANTS Nil
 
 \* Message types:
 CONSTANTS RequestVoteRequest, RequestVoteResponse,
-          AppendEntriesRequest, AppendEntriesResponse
+          AppendEntriesRequest, AppendEntriesResponse,
+          CatchupRequest, CatchupResponse,
+          AppendConfig
 
 ----
 \* Global variables
@@ -133,6 +136,14 @@ Min(s) == CHOOSE x \in s : \A y \in s : x <= y
 \* Return the maximum value from a set, or undefined if the set is empty.
 Max(s) == CHOOSE x \in s : \A y \in s : x >= y
 
+GetMaxConfigIndex(i) ==
+    LET chonfigIndexes == {index \in 1..Len(log[i]): log[i][index].type = ConfigEntry}
+    IN IF chonfigIndexes = {} THEN 0
+       ELSE Max(chonfigIndexes)
+
+GetConfig(i) ==
+    IF GetMaxConfigIndex(i) = 0 THEN ChangeServer
+    ELSE log[i][GetMaxConfigIndex(i)].value
 ----
 \* Define initial values for all variables
 
@@ -245,6 +256,7 @@ BecomeLeader(i) ==
 ClientRequest(i, v) ==
     /\ state[i] = Leader
     /\ LET entry == [term  |-> currentTerm[i],
+                     type  |-> ValueEntry,
                      value |-> v]
            newLog == Append(log[i], entry)
        IN  log' = [log EXCEPT ![i] = newLog]
@@ -273,6 +285,34 @@ AdvanceCommitIndex(i) ==
                   commitIndex[i]
        IN commitIndex' = [commitIndex EXCEPT ![i] = newCommitIndex]
     /\ UNCHANGED <<messages, serverVars, candidateVars, leaderVars, log>>
+
+\* Leader i add j server to cluster.
+AddNewServer(i, j) ==
+    /\ state[i] = Leader
+    /\ j \notin GetConfig(i)
+    /\ /\ currentTerm' = [currentTerm EXCEPT ![j] = 1]
+       /\ votedFor' = [votedFor EXCEPT ![j] = Nil]
+    /\ Send([mtype         |-> CatchupRequest,
+             mterm         |-> currentTerm[i],
+             mlogLen       |-> matchIndex[i][j],
+             mentires      |-> SubSeq(log[i],nextIndex[i][j],commitIndex[i]),
+             mcommitIndex  |-> commitIndex[i],
+             msource       |-> i,
+             mdest         |-> j])
+    /\ UNCHANGED <<state, leaderVars, logVars, candidateVars>>
+
+\* Leader i delete j server from cluster.
+DeleteServer(i,j) ==
+    /\ state[i] = Leader
+    /\ j \in GetConfig(i)
+    /\ j /= i
+    /\ Send([mtype         |-> AppendConfig,
+             mterm         |-> currentTerm[i],
+             madd          |-> FALSE,
+             mserver       |-> j,
+             msource       |-> i,
+             mdest         |-> i])
+    /\ UNCHANGED <<serverVars, leaderVars, logVars, candidateVars>>
 
 ----
 \* Message handlers
@@ -401,6 +441,80 @@ HandleAppendEntriesResponse(i, j, m) ==
     /\ Discard(m)
     /\ UNCHANGED <<serverVars, candidateVars, logVars, elections>>
 
+\* Server i receives a CatchupRequest from leader j.
+HandleCatchupRequest(i, j, m) ==
+    \/ /\ m.mterm < currentTerm[i]
+       /\ Reply([mtype           |-> CatchupResponse,
+                 mterm           |-> currentTerm[i],
+                 msuccess        |-> FALSE,
+                 mmatchIndex     |-> 0,
+                 msource         |-> i,
+                 mdest           |-> j],
+                 m)
+       /\ UNCHANGED <<serverVars, candidateVars, logVars, leaderVars>>
+    \/ /\ m.mterm >= currentTerm[i]
+       /\ currentTerm' = [currentTerm EXCEPT ![i]= m.mterm]
+       /\ log' = [log EXCEPT ![i] = SubSeq(log[i], 1, m.mlogLen) \o m.mentries]
+       /\ Reply([mtype           |-> CatchupResponse,
+                 mterm           |-> currentTerm[i],
+                 msuccess        |-> TRUE,
+                 mmatchIndex     |-> Len(log[i]),
+                 msource         |-> i,
+                 mdest           |-> j],
+                 m)
+        /\ UNCHANGED <<state, votedFor, candidateVars, logVars, leaderVars, commitIndex>>
+
+\* Leader i receives a CatchupResponse from detached server j.
+HandleCatchupResponse(i, j, m) ==
+    /\ \/ /\ m.msuccess
+          /\ \/ /\ m.mmatchIndex < commitIndex[i]
+                /\ m.mmatchIndex /= matchIndex[i][j]
+             \/ m.mmatchIndex = commitIndex[i]
+          /\ m.mterm = currentTerm[i]
+          /\ j \notin GetConfig(i)
+          /\ nextIndex'  = [nextIndex  EXCEPT ![i][j] = m.matchIndex + 1]
+          /\ matchIndex' = [matchIndex EXCEPT ![i][j] = m.matchIndex]
+          /\ /\ Reply([mtype         |-> AppendConfig,
+                       mterm         |-> currentTerm[i],
+                       madd          |-> TRUE,
+                       mserver       |-> j,
+                       msource       |-> i,
+                       mdest         |-> i],m)
+          /\ UNCHANGED <<elections>>
+       \/ /\ \/ ~m.msuccess
+             \/ /\ \/ m.mmatchIndex = commitIndex[i]
+                   \/ m.mmatchIndex = matchIndex[i][j]
+             \/ state[i] /= Leader
+             \/ m.mterm /= currentTerm[i]
+             \/ j \in GetConfig(i)
+          /\ Discard(m)
+          /\ UNCHANGED <<leaderVars>>
+     /\ UNCHANGED <<serverVars, candidateVars, logVars>>
+\* Leader i receives a AppendConfig message.
+HandleAppendConfig(i,m) ==
+    \/ /\ state[i] /= Leader \/ m.mterm = currentTerm[i]
+       /\ Discard(m)
+       /\ UNCHANGED <<serverVars, candidateVars, logVars, leaderVars>>
+    \/ /\ state[i] = Leader /\ m.mterm = currentTerm[i]
+       /\ \/ /\ GetMaxConfigIndex(i) <= commitIndex[i]
+             /\ LET newConfig == IF m.madd THEN UNION {GetConfig(i), {m.mserver}}
+                                 ELSE GetConfig(i) \ {m.mserver}
+                    newEntry == [term  |-> currentTerm[i],
+                                 type  |-> ConfigEntry,
+                                 value |-> newConfig]
+                    newLog == Append(log[i], newEntry)
+                IN log' = [log EXCEPT ![i] = newLog]
+             /\ Discard(m)
+             /\ UNCHANGED <<commitIndex>>
+          \/ /\ GetMaxConfigIndex(i) > commitIndex[i]
+             /\ Reply([mtype         |-> AppendConfig,
+                       mterm         |-> currentTerm[i],
+                       madd          |-> TRUE,
+                       mserver       |-> m.server,
+                       msource       |-> i,
+                       mdest         |-> i],m)
+             /\ UNCHANGED <<logVars>>
+       /\ UNCHANGED <<serverVars, candidateVars, leaderVars>>
 \* Any RPC with a newer term causes the recipient to advance its term first.
 UpdateTerm(i, j, m) ==
     /\ m.mterm > currentTerm[i]
@@ -433,7 +547,12 @@ Receive(m) ==
        \/ /\ m.mtype = AppendEntriesResponse
           /\ \/ DropStaleResponse(i, j, m)
              \/ HandleAppendEntriesResponse(i, j, m)
-
+       \/ /\ m.mtype = CatchupRequest
+          /\ HandleCatchupRequest(i, j, m)
+       \/ /\ m.mtype = CatchupResponse
+          /\ HandleCatchupResponse(i, j, m)
+       \/ /\ m.mtype = AppendConfig
+          /\ HandleAppendConfig(i, m)
 \* End of message handlers.
 ----
 \* Network state transitions
@@ -455,6 +574,8 @@ Next == /\ \/ \E i \in Server : Restart(i)
            \/ \E i,j \in Server : RequestVote(i, j)
            \/ \E i \in Server : BecomeLeader(i)
            \/ \E i \in Server, v \in Value : ClientRequest(i, v)
+           \/ \E i \in Server, j \in ChangeServer: AddNewServer(i,j)
+           \/ \E i \in Server, j \in ChangeServer: DeleteServer(i,j)
            \/ \E i \in Server : AdvanceCommitIndex(i)
            \/ \E i,j \in Server : AppendEntries(i, j)
            \/ \E m \in DOMAIN messages : Receive(m)
