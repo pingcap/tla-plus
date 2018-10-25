@@ -19,7 +19,7 @@
     <stringAttribute key="modelBehaviorNext" value=""/>
     <stringAttribute key="modelBehaviorSpec" value="Spec"/>
     <intAttribute key="modelBehaviorSpecType" value="1"/>
-    <stringAttribute key="modelBehaviorVars" value="elections, committedLogDecrease, messages, clientRequests, matchIndex, log, state, allLogs, commitIndex, currentTerm, votesResponded, committedLog, nextIndex, votesGranted, voterLog, votedFor"/>
+    <stringAttribute key="modelBehaviorVars" value="elections, committedLogDecrease, allServers, messages, clientRequests, matchIndex, log, votersOfServer, state, allLogs, commitIndex, currentTerm, votesResponded, committedLog, nextIndex, votesGranted, voterLog, votedFor"/>
     <stringAttribute key="modelComments" value=""/>
     <booleanAttribute key="modelCorrectnessCheckDeadlock" value="true"/>
     <listAttribute key="modelCorrectnessInvariants">
@@ -33,7 +33,6 @@
         <listEntry value="AppendEntriesResponse;;AppendEntriesResponse;1;0"/>
         <listEntry value="Follower;;Follower;1;0"/>
         <listEntry value="CatchupResponse;;CatchupResponse;1;0"/>
-        <listEntry value="ChangeServer;;{s4};1;1"/>
         <listEntry value="ValueEntry;;ValueEntry;1;0"/>
         <listEntry value="CatchupRequest;;CatchupRequest;1;0"/>
         <listEntry value="Leader;;Leader;1;0"/>
@@ -44,8 +43,9 @@
         <listEntry value="Candidate;;Candidate;1;0"/>
         <listEntry value="RequestVoteRequest;;RequestVoteRequest;1;0"/>
         <listEntry value="AppendEntriesRequest;;AppendEntriesRequest;1;0"/>
-        <listEntry value="Server;;{s1, s2, s3};1;1"/>
         <listEntry value="MaxClientRequests;;2;0;0"/>
+        <listEntry value="JoinServers;;{&quot;s4&quot;};0;0"/>
+        <listEntry value="InitialServers;;{&quot;s1&quot;,&quot;s2&quot;,&quot;s3&quot;};0;0"/>
     </listAttribute>
     <stringAttribute key="modelParameterContraint" value=""/>
     <listAttribute key="modelParameterDefinitions"/>
