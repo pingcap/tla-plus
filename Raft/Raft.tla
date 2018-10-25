@@ -10,8 +10,6 @@ EXTENDS Naturals, FiniteSets, Sequences, TLC
 \* The set of server IDs
 CONSTANTS ChangeServer, Server
 
-\* The set of requests that can go into the log
-CONSTANTS Value
 CONSTANTS ValueEntry,ConfigEntry
 
 \* Server states.
@@ -25,6 +23,9 @@ CONSTANTS RequestVoteRequest, RequestVoteResponse,
           AppendEntriesRequest, AppendEntriesResponse,
           CatchupRequest, CatchupResponse,
           AppendConfig
+          
+\* Maximum number of client requests
+CONSTANTS MaxClientRequests
 
 ----
 \* Global variables
@@ -58,13 +59,20 @@ VARIABLE state
 VARIABLE votedFor
 serverVars == <<currentTerm, state, votedFor>>
 
+\* The set of requests that can go into the log
+VARIABLE clientRequests
+
 \* A Sequence of log entries. The index into this sequence is the index of the
 \* log entry. Unfortunately, the Sequence module defines Head(s) as the entry
 \* with index 1, so be careful not to use that!
 VARIABLE log
 \* The index of the latest entry in the log the state machine may apply.
 VARIABLE commitIndex
-logVars == <<log, commitIndex>>
+\* The index that gets committed
+VARIABLE committedLog
+\* Does the commited Index decrease
+VARIABLE committedLogDecrease
+logVars == <<log, commitIndex, clientRequests, committedLog, committedLogDecrease>>
 
 \* The following variables are used only on candidates:
 \* The set of servers from which the candidate has received a RequestVote
@@ -108,7 +116,7 @@ LastTerm(xlog) == IF Len(xlog) = 0 THEN 0 ELSE xlog[Len(xlog)].term
 \* new bag of messages with one more m in it.
 WithMessage(m, msgs) ==
     IF m \in DOMAIN msgs THEN
-        [msgs EXCEPT ![m] = msgs[m] + 1]
+       [msgs EXCEPT ![m] = IF msgs[m] < 2 THEN msgs[m] + 1 ELSE 2 ]
     ELSE
         msgs @@ (m :> 1)
 
@@ -119,6 +127,13 @@ WithoutMessage(m, msgs) ==
         [msgs EXCEPT ![m] = msgs[m] - 1]
     ELSE
         msgs
+
+ValidMessage(msgs) ==
+    { m \in DOMAIN messages : msgs[m] > 0 }
+    
+SingleMessage(msgs) ==
+    { m \in DOMAIN messages : msgs[m] = 1 } 
+
 
 \* Add a message to the bag of messages.
 Send(m) == messages' = WithMessage(m, messages)
@@ -162,6 +177,9 @@ InitLeaderVars == /\ nextIndex  = [i \in Server |-> [j \in Server |-> 1]]
                   /\ matchIndex = [i \in Server |-> [j \in Server |-> 0]]
 InitLogVars == /\ log          = [i \in Server |-> << >>]
                /\ commitIndex  = [i \in Server |-> 0]
+               /\ clientRequests = 1
+               /\ committedLog = << >>
+               /\ committedLogDecrease = FALSE
 Init == /\ messages = [m \in {} |-> 0]
         /\ InitHistoryVars
         /\ InitServerVars
@@ -182,7 +200,7 @@ Restart(i) ==
     /\ nextIndex'      = [nextIndex EXCEPT ![i] = [j \in Server |-> 1]]
     /\ matchIndex'     = [matchIndex EXCEPT ![i] = [j \in Server |-> 0]]
     /\ commitIndex'    = [commitIndex EXCEPT ![i] = 0]
-    /\ UNCHANGED <<messages, currentTerm, votedFor, log, elections>>
+    /\ UNCHANGED <<messages, currentTerm, votedFor, log, elections, clientRequests, committedLog, committedLogDecrease>>
 
 \* Server i times out and starts a new election.
 Timeout(i) == /\ state[i] \in {Follower, Candidate}
@@ -253,15 +271,17 @@ BecomeLeader(i) ==
     /\ UNCHANGED <<messages, currentTerm, votedFor, candidateVars, logVars>>
 
 \* Leader i receives a client request to add v to the log.
-ClientRequest(i, v) ==
+ClientRequest(i) ==
     /\ state[i] = Leader
+    /\ clientRequests < MaxClientRequests
     /\ LET entry == [term  |-> currentTerm[i],
                      type  |-> ValueEntry,
-                     value |-> v]
+                     value |-> clientRequests]
            newLog == Append(log[i], entry)
-       IN  log' = [log EXCEPT ![i] = newLog]
+       IN /\ log' = [log EXCEPT ![i] = newLog]
+          /\ clientRequests' = clientRequests + 1
     /\ UNCHANGED <<messages, serverVars, candidateVars,
-                   leaderVars, commitIndex>>
+                   leaderVars, commitIndex, committedLog, committedLogDecrease>>
 
 \* Leader i advances its commitIndex.
 \* This is done as a separate step from handling AppendEntries responses,
@@ -283,8 +303,17 @@ AdvanceCommitIndex(i) ==
                   Max(agreeIndexes)
               ELSE
                   commitIndex[i]
-       IN commitIndex' = [commitIndex EXCEPT ![i] = newCommitIndex]
-    /\ UNCHANGED <<messages, serverVars, candidateVars, leaderVars, log>>
+           newCommittedLog ==
+              IF newCommitIndex > 1 
+              THEN
+                  [j \in 1..newCommitIndex |-> log[i][j]]
+              ELSE
+                  <<>>
+       IN /\ commitIndex' = [commitIndex EXCEPT ![i] = newCommitIndex]
+          /\ committedLogDecrease' = \/ ( newCommitIndex < Len(committedLog) )
+                                     \/ \E j \in 1..Len(committedLog) : committedLog[j] /= newCommittedLog[j]
+          /\ committedLog' = newCommittedLog
+    /\ UNCHANGED <<messages, serverVars, candidateVars, leaderVars, log, clientRequests>>
 
 \* Leader i add j server to cluster.
 AddNewServer(i, j) ==
@@ -410,7 +439,7 @@ HandleAppendEntriesRequest(i, j, m) ==
                                  msource         |-> i,
                                  mdest           |-> j],
                                  m)
-                       /\ UNCHANGED <<serverVars, log>>
+                       /\ UNCHANGED <<serverVars, log, clientRequests, committedLog, committedLogDecrease>>
                    \/ \* conflict: remove 1 entry
                        /\ m.mentries /= << >>
                        /\ Len(log[i]) >= index
@@ -418,13 +447,13 @@ HandleAppendEntriesRequest(i, j, m) ==
                        /\ LET new == [index2 \in 1..(Len(log[i]) - 1) |->
                                           log[i][index2]]
                           IN log' = [log EXCEPT ![i] = new]
-                       /\ UNCHANGED <<serverVars, commitIndex, messages>>
+                       /\ UNCHANGED <<serverVars, commitIndex, messages,clientRequests, committedLog, committedLogDecrease>>
                    \/ \* no conflict: append entry
                        /\ m.mentries /= << >>
                        /\ Len(log[i]) = m.mprevLogIndex
                        /\ log' = [log EXCEPT ![i] =
                                       Append(log[i], m.mentries[1])]
-                       /\ UNCHANGED <<serverVars, commitIndex, messages>>
+                       /\ UNCHANGED <<serverVars, commitIndex, messages, clientRequests, committedLog, committedLogDecrease>>
        /\ UNCHANGED <<candidateVars, leaderVars>>
 
 \* Server i receives an AppendEntries response from server j with
@@ -505,7 +534,7 @@ HandleAppendConfig(i,m) ==
                     newLog == Append(log[i], newEntry)
                 IN log' = [log EXCEPT ![i] = newLog]
              /\ Discard(m)
-             /\ UNCHANGED <<commitIndex>>
+             /\ UNCHANGED <<commitIndex, clientRequests, committedLog, committedLogDecrease>>
           \/ /\ GetMaxConfigIndex(i) > commitIndex[i]
              /\ Reply([mtype         |-> AppendConfig,
                        mterm         |-> currentTerm[i],
@@ -514,7 +543,7 @@ HandleAppendConfig(i,m) ==
                        msource       |-> i,
                        mdest         |-> i],m)
              /\ UNCHANGED <<logVars>>
-       /\ UNCHANGED <<serverVars, candidateVars, leaderVars>>
+       /\ UNCHANGED <<serverVars, candidateVars, leaderVars, clientRequests, committedLog, committedLogDecrease>>
 \* Any RPC with a newer term causes the recipient to advance its term first.
 UpdateTerm(i, j, m) ==
     /\ m.mterm > currentTerm[i]
@@ -573,16 +602,18 @@ Next == /\ \/ \E i \in Server : Restart(i)
            \/ \E i \in Server : Timeout(i)
            \/ \E i,j \in Server : RequestVote(i, j)
            \/ \E i \in Server : BecomeLeader(i)
-           \/ \E i \in Server, v \in Value : ClientRequest(i, v)
+           \/ \E i \in Server : ClientRequest(i)
            \/ \E i \in Server, j \in ChangeServer: AddNewServer(i,j)
            \/ \E i \in Server, j \in ChangeServer: DeleteServer(i,j)
            \/ \E i \in Server : AdvanceCommitIndex(i)
            \/ \E i,j \in Server : AppendEntries(i, j)
-           \/ \E m \in DOMAIN messages : Receive(m)
-           \/ \E m \in DOMAIN messages : DuplicateMessage(m)
-           \/ \E m \in DOMAIN messages : DropMessage(m)
+           \/ \E m \in ValidMessage(messages) : Receive(m)
+           \/ \E m \in SingleMessage(messages) : DuplicateMessage(m)
+           \/ \E m \in ValidMessage(messages) : DropMessage(m)
            \* History variable that tracks every log ever:
         /\ allLogs' = allLogs \cup {log[i] : i \in Server}
+        /\ \A i \in Server: Len(log[i]) <10
+        
 
 \* The specification must start with the initial state and transition according
 \* to Next.
@@ -591,6 +622,6 @@ Spec == Init /\ [][Next]_vars
 \* The following are a set of verification.
 
 MoreThanOneLeader ==
-   Cardinality({i \in Server: state[i]=Leader}) <= 1
+   Cardinality({i \in Server: state[i]=Leader}) > 1
  
 ===============================================================================
