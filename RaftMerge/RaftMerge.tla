@@ -213,7 +213,7 @@ ClientRequest(i, r, log) ==
   /\ LET
        new_logs == Append(raft[i][r].logs, log)
        new_match_index == [raft[i][r].match_index EXCEPT ![i] = @ + 1]
-     IN
+     IN 
        /\ raft' = [raft EXCEPT ![i][r].logs = new_logs,
                                ![i][r].match_index = new_match_index]
        /\ client_requests_index' = client_requests_index + 1
