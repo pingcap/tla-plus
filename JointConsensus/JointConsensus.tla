@@ -69,11 +69,7 @@ VARIABLE clientRequests
 VARIABLE log
 \* The index of the latest entry in the log the state machine may apply.
 VARIABLE commitIndex
-\* The index that gets committed
-VARIABLE committedLog
-\* Does the commited Index decrease
-VARIABLE committedLogDecrease
-logVars == <<log, commitIndex, clientRequests, committedLog, committedLogDecrease>>
+logVars == <<log, commitIndex, clientRequests>>
 
 \* The following variables are used only on candidates:
 \* The set of servers from which the candidate has received a RequestVote
@@ -180,8 +176,6 @@ InitLeaderVars == /\ nextIndex  = [i \in allServers |-> [j \in allServers |-> 1]
 InitLogVars == /\ log          = [i \in allServers |-> << >>]
                /\ commitIndex  = [i \in allServers |-> 0]
                /\ clientRequests = 1
-               /\ committedLog = << >>
-               /\ committedLogDecrease = FALSE
 
 Init == /\ messages = {}
         /\ InitServerVars
@@ -232,23 +226,26 @@ AppendEntries(i, j) ==
            \* Send up to 1 entry, constrained by the end of the log.
            lastEntry == Min({Len(log[i]), nextIndex[i][j]})
            entries == SubSeq(log[i], nextIndex[i][j], lastEntry)
-       IN /\ Len(entries) > 0 /\ matchIndex[i][j] < lastEntry
-          /\ Send([mtype          |-> AppendEntriesRequest,
+           msg == [mtype          |-> AppendEntriesRequest,
                    mterm          |-> currentTerm[i],
                    mprevLogIndex  |-> prevLogIndex,
                    mprevLogTerm   |-> prevLogTerm,
                    mentries       |-> entries,
                    mcommitIndex   |-> Min({commitIndex[i], lastEntry}),
                    msource        |-> i,
-                   mdest          |-> j])
+                   mdest          |-> j]
+       IN /\ matchIndex[i][j] < lastEntry
+          /\ msg \notin messages
+          /\ Send(msg)
     /\ UNCHANGED <<serverVars, candidateVars, leaderVars, logVars, nodeVars>>
 
 \* Candidate i transitions to leader.
 BecomeLeader(i) ==
     /\ state[i] = Candidate
+    /\ \* already delete member should not become leader.
+        i \in voters[i]
     /\ votesGranted[i] \in BothQuorum(voters[i], nextVoters[i])
     /\ state'      = [state EXCEPT ![i] = Leader]
-    \*/\ PrintT(i \cup "became leader")
     /\ nextIndex'  = [nextIndex EXCEPT ![i] =
                          [j \in allServers |-> Len(log[i]) + 1]]
     /\ matchIndex' = [matchIndex EXCEPT ![i] =
@@ -281,23 +278,12 @@ AdvanceCommitIndex(i) ==
                   Max(agreeIndexes)
               ELSE
                   commitIndex[i]
-           newCommittedLog ==
-              IF newCommitIndex >= 1
-              THEN
-                  [j \in 1..newCommitIndex |-> log[i][j]]
-              ELSE
-                  <<>>
-       IN /\ commitIndex[i] /= newCommitIndex
-          /\ commitIndex' = [commitIndex EXCEPT ![i] = newCommitIndex]
-          /\ committedLogDecrease' = \/ ( newCommitIndex < Len(committedLog))
-                                     \/ \E j \in 1..Len(committedLog) : committedLog[j] /= newCommittedLog[j]
-          /\ committedLog' = newCommittedLog
-          \*/\ PrintT(Len(log[i])\cup newCommitIndex)
+       IN /\ commitIndex' = [commitIndex EXCEPT ![i] = newCommitIndex]
     /\ UNCHANGED <<messages, serverVars, candidateVars, leaderVars, log, clientRequests, nodeVars>>
 
 \* Leader i apply its committed confiuration.
 ApplyConfig(i) ==
-    /\ GetMaxConfigIndex(i,commitIndex[i]) > 0
+    /\ GetMaxConfigIndex(i, commitIndex[i]) > 0
     /\ LET config == GetLatestCommitConfig(i)
        IN IF voters[i] /= config.newConf
           THEN /\ \/ \* leader not in the new configuration.
@@ -326,7 +312,7 @@ SetNodes(i, newNodes) ==
        IN /\ log' = [log EXCEPT ![i] = Append(@,entry)]
           /\ nextVoters' = [nextVoters EXCEPT ![i] = newNodes]
     /\ UNCHANGED <<messages, state, votedFor, currentTerm, candidateVars,
-                leaderVars, commitIndex, committedLog, committedLogDecrease, allServers, voters, clientRequests>>
+                leaderVars, commitIndex, allServers, voters, clientRequests>>
 
 \* Leader i receives a client request to add v to the log.
 ClientRequest(i) ==
@@ -339,7 +325,7 @@ ClientRequest(i) ==
        IN /\ log' = [log EXCEPT ![i] = newLog]
           /\ clientRequests' = clientRequests + 1
     /\ UNCHANGED <<messages, serverVars, candidateVars,
-                   leaderVars, commitIndex, committedLog, committedLogDecrease, nodeVars>>
+                   leaderVars, commitIndex, nodeVars>>
 ----
 \* Message handlers
 \* i = recipient, j = sender, m = message
@@ -436,7 +422,7 @@ HandleAppendEntriesRequest(i, j, m) ==
                                  msource         |-> i,
                                  mdest           |-> j],
                                  m)
-                       /\ UNCHANGED <<serverVars, log, clientRequests, committedLog, committedLogDecrease, nodeVars>>
+                       /\ UNCHANGED <<serverVars, log, clientRequests, nodeVars>>
                    \/ \* conflict: remove 1 entry
                        /\ m.mentries /= << >>
                        /\ Len(log[i]) >= index
@@ -444,13 +430,13 @@ HandleAppendEntriesRequest(i, j, m) ==
                        /\ LET new == [index2 \in 1..(Len(log[i]) - 1) |->
                                           log[i][index2]]
                           IN log' = [log EXCEPT ![i] = new]
-                       /\ UNCHANGED <<serverVars, commitIndex, messages,clientRequests, committedLog, committedLogDecrease, nodeVars>>
+                       /\ UNCHANGED <<serverVars, commitIndex, messages,clientRequests, nodeVars>>
                    \/ \* no conflict: append entry
                        /\ m.mentries /= << >>
                        /\ Len(log[i]) = m.mprevLogIndex
                        /\ log' = [log EXCEPT ![i] =
                                       Append(log[i], m.mentries[1])]
-                       /\ UNCHANGED <<serverVars, commitIndex, messages, clientRequests, committedLog, committedLogDecrease, nodeVars>>
+                       /\ UNCHANGED <<serverVars, commitIndex, messages, clientRequests, nodeVars>>
        /\ UNCHANGED <<candidateVars, leaderVars>>
 
 \* Servers i receives an AppendEntries response from server j with
@@ -459,6 +445,7 @@ HandleAppendEntriesResponse(i, j, m) ==
     /\ m.mterm = currentTerm[i]
     /\ \/ /\ m.msuccess \* successful
           /\ nextIndex'  = [nextIndex  EXCEPT ![i][j] = m.mmatchIndex + 1]
+          /\ matchIndex[i][j] < m.mmatchIndex
           /\ matchIndex' = [matchIndex EXCEPT ![i][j] = m.mmatchIndex]
        \/ /\ \lnot m.msuccess \* not successful
           /\ nextIndex' = [nextIndex EXCEPT ![i][j] =
@@ -511,7 +498,7 @@ Next ==
     \/ \E m \in messages : Receive(m)
     \/ \/ /\ \A i \in allServers : state[i] = Follower
           /\ \E i \in allServers : Timeout(i)
-       \/ /\ \E i \in allServers : state[i] /= Follower
+       \/ /\ \E i \in allServers: state[i] /= Follower
           /\ UNCHANGED <<serverVars, candidateVars, messages, logVars, leaderVars, nodeVars>>
     \* Client request
     \/ \E i \in allServers : ClientRequest(i)
@@ -529,17 +516,21 @@ Spec == Init /\ [][Next]_vars
 \* The following are a set of verification.
 
 MoreThanOneLeader ==
-  Cardinality({i \in allServers: state[i]=Leader}) > 1
+    Cardinality({i \in allServers: state[i]=Leader}) > 1
 
-TransitionPhaseChecker ==
-  \A i \in allServers: LET inTransition == /\ commitIndex[i] > 1
-                                           /\ commitIndex[i] < GetMaxConfigIndex(i,Len(log[i])) 
-                                           /\ GetMaxConfigIndex(i,Len(log[i])) > 0
-                           configEntry  == GetLatestConfig(i)
+TransitionPhase ==
+    \A i \in allServers: LET maxConfigIndex == GetMaxConfigIndex(i,Len(log[i]))
+                             inTransition == /\ commitIndex[i] > 0
+                                             /\ maxConfigIndex > 0
+                                             \* commitIndex less config index, but
+                                             /\ commitIndex[i] < maxConfigIndex
+                             configEntry  == GetLatestConfig(i)
                        IN IF inTransition THEN
                              IF state[i] = Leader THEN
+                                \* Leader in stransition should contain Cold and Cnew.
                                 /\ voters[i] = configEntry.oldConf
                                 /\ nextVoters[i] = configEntry.newConf
-                             ELSE /\ voters[i] = configEntry.oldConf
+                             ELSE \/ voters[i] = configEntry.oldConf
+                                  \/ voters[i] = {}
                           ELSE TRUE
 ===============================================================================
