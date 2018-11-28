@@ -6,7 +6,7 @@
     <intAttribute key="dfidDepth" value="100"/>
     <booleanAttribute key="dfidMode" value="false"/>
     <intAttribute key="distributedFPSetCount" value="0"/>
-    <stringAttribute key="distributedNetworkInterface" value="172.17.0.1"/>
+    <stringAttribute key="distributedNetworkInterface" value="10.11.0.14"/>
     <intAttribute key="distributedNodesCount" value="1"/>
     <stringAttribute key="distributedTLC" value="off"/>
     <stringAttribute key="distributedTLCVMArgs" value=""/>
@@ -19,7 +19,7 @@
     <stringAttribute key="modelBehaviorNext" value=""/>
     <stringAttribute key="modelBehaviorSpec" value="Spec"/>
     <intAttribute key="modelBehaviorSpecType" value="1"/>
-    <stringAttribute key="modelBehaviorVars" value="elections, allServers, messages, clientRequests, matchIndex, log, state, commitIndex, nextVoters, currentTerm, votesResponded, voters, nextIndex, votesGranted, voterLog, votedFor"/>
+    <stringAttribute key="modelBehaviorVars" value="elections, allServers, messages, clientRequests, matchIndex, log, state, commitIndex, applyIndex, nextVoters, currentTerm, votesResponded, voters, nextIndex, votesGranted, voterLog, votedFor"/>
     <stringAttribute key="modelComments" value=""/>
     <booleanAttribute key="modelCorrectnessCheckDeadlock" value="true"/>
     <listAttribute key="modelCorrectnessInvariants">
@@ -32,9 +32,7 @@
     <listAttribute key="modelParameterConstants">
         <listEntry value="AppendEntriesResponse;;AppendEntriesResponse;1;0"/>
         <listEntry value="Follower;;Follower;1;0"/>
-        <listEntry value="ValueEntry;;ValueEntry;1;0"/>
         <listEntry value="Leader;;Leader;1;0"/>
-        <listEntry value="ConfigEntry;;ConfigEntry;1;0"/>
         <listEntry value="InitialServers;;{&quot;s1&quot;};0;0"/>
         <listEntry value="Nil;;Nil;1;0"/>
         <listEntry value="RequestVoteResponse;;RequestVoteResponse;1;0"/>
@@ -43,6 +41,9 @@
         <listEntry value="AppendEntriesRequest;;AppendEntriesRequest;1;0"/>
         <listEntry value="NewServers;;{&quot;s3&quot;};0;0"/>
         <listEntry value="MaxClientRequests;;2;0;0"/>
+        <listEntry value="FinalizeConfChange;;FinalizeConfChange;1;0"/>
+        <listEntry value="NormalEntry;;NormalEntry;1;0"/>
+        <listEntry value="BeginConfChange;;BeginConfChange;1;0"/>
     </listAttribute>
     <stringAttribute key="modelParameterContraint" value=""/>
     <listAttribute key="modelParameterDefinitions"/>

@@ -2,6 +2,7 @@
 \* This is the formal specification for the Raft consensus algorithm.
 \*
 \* Copyright 2014 Diego Ongaro.
+\* 
 \* This work is licensed under the Creative Commons Attribution-4.0
 \* International License https://creativecommons.org/licenses/by/4.0/
 
@@ -10,7 +11,7 @@ EXTENDS Naturals, FiniteSets, Sequences, TLC
 \* The set of server IDs
 CONSTANTS InitialServers, NewServers
 
-CONSTANTS ValueEntry,ConfigEntry
+CONSTANTS NormalEntry, BeginConfChange, FinalizeConfChange
 
 \* Servers states.
 CONSTANTS Follower, Candidate, Leader
@@ -67,9 +68,11 @@ VARIABLE clientRequests
 \* log entry. Unfortunately, the Sequence module defines Head(s) as the entry
 \* with index 1, so be careful not to use that!
 VARIABLE log
-\* The index of the latest entry in the log the state machine may apply.
+\* The index of the latest entry in the log the state machine has commited.
 VARIABLE commitIndex
-logVars == <<log, commitIndex, clientRequests>>
+\* The index of the latest entry in the log the state machine has apply.
+VARIABLE applyIndex
+logVars == <<log, commitIndex, applyIndex, clientRequests>>
 
 \* The following variables are used only on candidates:
 \* The set of servers from which the candidate has received a RequestVote
@@ -134,7 +137,7 @@ Max(s) == CHOOSE x \in s : \A y \in s : x >= y
 
 \* Get the maximum config from log[1..l].
 GetMaxConfigIndex(i, l) ==
-    LET chonfigIndexes == {index \in 1..l: log[i][index].type = ConfigEntry}
+    LET chonfigIndexes == {index \in 1..l: log[i][index].type = BeginConfChange \/ log[i][index].type = FinalizeConfChange}
     IN IF chonfigIndexes = {} THEN 0
        ELSE Max(chonfigIndexes)
 \* Get the latest config in all log of server i.
@@ -175,6 +178,7 @@ InitLeaderVars == /\ nextIndex  = [i \in allServers |-> [j \in allServers |-> 1]
 
 InitLogVars == /\ log          = [i \in allServers |-> << >>]
                /\ commitIndex  = [i \in allServers |-> 0]
+               /\ applyIndex = [i \in allServers |-> 0]
                /\ clientRequests = 1
 
 Init == /\ messages = {}
@@ -279,53 +283,71 @@ AdvanceCommitIndex(i) ==
               ELSE
                   commitIndex[i]
        IN /\ commitIndex' = [commitIndex EXCEPT ![i] = newCommitIndex]
-    /\ UNCHANGED <<messages, serverVars, candidateVars, leaderVars, log, clientRequests, nodeVars>>
-
-\* Leader i apply its committed confiuration.
-ApplyConfig(i) ==
-    /\ GetMaxConfigIndex(i, commitIndex[i]) > 0
-    /\ LET config == GetLatestCommitConfig(i)
-       IN IF voters[i] /= config.newConf
-          THEN /\ \/ \* leader not in the new configuration.
-                     \* switch to Follwer.
-                     /\ i \notin config.newConf
-                     /\ state[i] = Leader
-                     /\ state' = [state EXCEPT ![i] = Follower]
-                  \/ /\ i \in config.newConf
-                     /\ UNCHANGED <<state>>
-               /\ voters' = [ voters EXCEPT ![i] = config.newConf]
-               /\ nextVoters' = [nextVoters EXCEPT ![i] = {}]
-          ELSE UNCHANGED <<voters, state, nextVoters>>
-    /\ UNCHANGED <<messages, currentTerm, votedFor, candidateVars, leaderVars, logVars, allServers>>
+    /\ UNCHANGED <<messages, serverVars, candidateVars, leaderVars, log, applyIndex, clientRequests, nodeVars>>
+    
+\* ApplyLog apply the commit entrys of server i.
+ApplyLog(i) ==
+    LET 
+        next == applyIndex[i] + 1
+        entry == log[i][next]
+    IN 
+       /\ applyIndex[i] < commitIndex[i]
+       /\ \/ \* apply normal entry
+             /\ entry.type = NormalEntry
+             /\ applyIndex' = [ applyIndex EXCEPT ![i] = next ]
+             /\ UNCHANGED <<nextVoters, state, voters, log>>
+          \/ \* begin the membership change
+             /\ entry.type = BeginConfChange
+             /\ nextVoters' = [nextVoters EXCEPT ![i] = entry.newConf]
+             /\ applyIndex' = [ applyIndex EXCEPT ![i] = next ]
+             /\ \/ /\ state[i] = Leader
+                   /\ LET oldConfig == voters[i]
+                          newEntry == [term    |-> currentTerm[i],
+                                       type    |-> FinalizeConfChange]
+                      IN log' = [log EXCEPT ![i] = Append(@,newEntry)]
+                \/ /\ state[i] = Follower
+                   /\ UNCHANGED <<log>>
+             /\ UNCHANGED <<state, voters>>
+          \/ \* finalize the membership change    
+             /\ entry.type = FinalizeConfChange
+             /\ /\ \/ \* leader not in the new configuration.
+                      \* step to Follwer.
+                      /\ i \notin nextVoters[i]
+                      /\ state[i] = Leader
+                      /\ state' = [state EXCEPT ![i] = Follower]
+                   \/ /\ i \in nextVoters[i]
+                      /\ UNCHANGED <<state>>
+             /\ voters' = [ voters EXCEPT ![i] = nextVoters[i]]
+             /\ nextVoters' = [nextVoters EXCEPT ![i] = {}]
+             /\ applyIndex' = [ applyIndex EXCEPT ![i] = next ]
+             /\ UNCHANGED <<log>>
+       /\ UNCHANGED <<messages, currentTerm, votedFor, candidateVars, leaderVars , commitIndex, clientRequests, allServers>>
 
 \* Leader i add a group servers to cluster.
-SetNodes(i, newNodes) ==
+ProposeMembership(i, newNodes) ==
     /\ state[i] = Leader
     /\ \* for reducing the state space, just verify once.
-       Len(SelectSeq(log[i], LAMBDA logEntry : logEntry.type = ConfigEntry)) = 0
+       Len(SelectSeq(log[i], LAMBDA logEntry : logEntry.type = BeginConfChange)) = 0
     /\ LET oldConfig == voters[i]
            entry == [term    |-> currentTerm[i],
-                     type    |-> ConfigEntry,
+                     type    |-> BeginConfChange,
                      newConf |-> newNodes,
                      oldConf |-> oldConfig]
-           newLog == Append(log[i], entry)
-       IN /\ log' = [log EXCEPT ![i] = Append(@,entry)]
-          /\ nextVoters' = [nextVoters EXCEPT ![i] = newNodes]
+       IN log' = [log EXCEPT ![i] = Append(@,entry)]
     /\ UNCHANGED <<messages, state, votedFor, currentTerm, candidateVars,
-                leaderVars, commitIndex, allServers, voters, clientRequests>>
+                leaderVars, commitIndex, applyIndex, allServers, voters, nextVoters, clientRequests>>
 
 \* Leader i receives a client request to add v to the log.
 ClientRequest(i) ==
     /\ state[i] = Leader
     /\ clientRequests < MaxClientRequests
     /\ LET entry == [term  |-> currentTerm[i],
-                     type  |-> ValueEntry,
+                     type  |-> NormalEntry,
                      value |-> clientRequests]
-           newLog == Append(log[i], entry)
-       IN /\ log' = [log EXCEPT ![i] = newLog]
+       IN /\ log' = [log EXCEPT ![i] = Append(@,entry)]
           /\ clientRequests' = clientRequests + 1
     /\ UNCHANGED <<messages, serverVars, candidateVars,
-                   leaderVars, commitIndex, nodeVars>>
+                   leaderVars, commitIndex, applyIndex, nodeVars>>
 ----
 \* Message handlers
 \* i = recipient, j = sender, m = message
@@ -422,7 +444,7 @@ HandleAppendEntriesRequest(i, j, m) ==
                                  msource         |-> i,
                                  mdest           |-> j],
                                  m)
-                       /\ UNCHANGED <<serverVars, log, clientRequests, nodeVars>>
+                       /\ UNCHANGED <<serverVars, log, applyIndex, clientRequests, nodeVars>>
                    \/ \* conflict: remove 1 entry
                        /\ m.mentries /= << >>
                        /\ Len(log[i]) >= index
@@ -430,13 +452,13 @@ HandleAppendEntriesRequest(i, j, m) ==
                        /\ LET new == [index2 \in 1..(Len(log[i]) - 1) |->
                                           log[i][index2]]
                           IN log' = [log EXCEPT ![i] = new]
-                       /\ UNCHANGED <<serverVars, commitIndex, messages,clientRequests, nodeVars>>
+                       /\ UNCHANGED <<serverVars, commitIndex, applyIndex, messages,clientRequests, nodeVars>>
                    \/ \* no conflict: append entry
                        /\ m.mentries /= << >>
                        /\ Len(log[i]) = m.mprevLogIndex
                        /\ log' = [log EXCEPT ![i] =
                                       Append(log[i], m.mentries[1])]
-                       /\ UNCHANGED <<serverVars, commitIndex, messages, clientRequests, nodeVars>>
+                       /\ UNCHANGED <<serverVars, commitIndex, applyIndex, messages, clientRequests, nodeVars>>
        /\ UNCHANGED <<candidateVars, leaderVars>>
 
 \* Servers i receives an AppendEntries response from server j with
@@ -503,11 +525,11 @@ Next ==
     \* Client request
     \/ \E i \in allServers : ClientRequest(i)
     \* Config changed with joint consensus
-    \/ \E i \in allServers: SetNodes(i, NewServers)
+    \/ \E i \in allServers: ProposeMembership(i, NewServers)
     \* Log replica
     \/ \E i,j \in allServers : AppendEntries(i, j)
     \/ \E i \in allServers : AdvanceCommitIndex(i)
-    \/ \E i \in allServers : ApplyConfig(i)
+    \/ \E i \in allServers : ApplyLog(i)
 
 \* The specification must start with the initial state and transition according
 \* to Next.
@@ -520,11 +542,11 @@ MoreThanOneLeader ==
 
 TransitionPhase ==
     \A i \in allServers: LET maxConfigIndex == GetMaxConfigIndex(i,Len(log[i]))
+                             configEntry  == GetLatestConfig(i)
                              inTransition == /\ commitIndex[i] > 0
                                              /\ maxConfigIndex > 0
-                                             \* commitIndex less config index, but
-                                             /\ commitIndex[i] < maxConfigIndex
-                             configEntry  == GetLatestConfig(i)
+                                             /\ applyIndex[i] >= maxConfigIndex
+                                             /\ configEntry.type = BeginConfChange
                        IN IF inTransition THEN
                              IF state[i] = Leader THEN
                                 \* Leader in stransition should contain Cold and Cnew.
