@@ -109,19 +109,19 @@ Apply ==
     /\ UNCHANGED <<nextTS, resolvedQueue, outputTSQueue, reState, chanOffset>>
 
 TxnEventsWithPessimistic ==
-    \E r \in RM:
+    \/ \E r \in RM:
         \/ PessimisticPrewrite(r)
         \/ Prewrite(r)
         \/ Commit(r)
         \/ Rollback(r)
-        \/ Apply
+    \/ Apply
 
 TxnEvents ==
-    \E r \in RM:
+    \/ \E r \in RM:
         \/ Prewrite(r)
         \/ Commit(r)
         \/ Rollback(r)
-        \/ Apply
+    \/ Apply
 
 Min(s) ==
     IF s = {} THEN 0
@@ -201,11 +201,9 @@ RTNextWithPessimistic ==
     \/ FetchTS
     \/ HandleMsg
 
-RTSpec == RTInit /\ [][RTNext]_vars /\ WF_resolvedQueue(HandleMsgFetchTS)
+RTSpec == RTInit /\ [][RTNext]_vars
 
-RTSpecWithPessimistic ==
-    /\ RTInit /\ [][RTNextWithPessimistic]_vars
-    /\ WF_resolvedQueue(HandleMsgFetchTS)
+RTSpecWithPessimistic == RTInit /\ [][RTNextWithPessimistic]_vars
 
 \* Even if there is no write, it can always output
 \* resolved ts solely by FetchTS.
