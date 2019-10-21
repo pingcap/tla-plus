@@ -71,7 +71,7 @@ Start(c) ==
   /\ \E ks \in SUBSET KEY:
        \E primary \in ks:
          client_key' =
-           [client_key EXCEPT 
+           [client_key EXCEPT
              ![c] = [primary |-> primary,
                      secondary |-> ks \ {primary},
                      pessimistic |-> ks,
@@ -96,7 +96,7 @@ Init ==
 
 ClientOp(c) ==
   \/ Start(c)
-      
+
 Next == \E c \in CLIENT : ClientOp(c)
 
 -----------------------------------------------------------------------------
@@ -108,11 +108,11 @@ ClientStateTypeInv ==
     CLIENT -> {"init", "working", "prewriting",
                "committing", "committed", "aborted"}
   ]
-                               
+
 ClientTsTypeInv ==
   client_ts \in
   [CLIENT -> [start_ts : Nat, for_update_ts: Nat, commit_ts : Nat]]
-  
+
 ClientKeyTypeInv ==
   \A c \in CLIENT:
     \/ client_state[c] = "init"
@@ -121,7 +121,7 @@ ClientKeyTypeInv ==
                 pessimistic: SUBSET KEY,
                 pending : SUBSET KEY
                ]
-  
+
 KeyDataTypeInv ==
   key_data \in [KEY -> SUBSET [ts: Pos]]
 
@@ -129,10 +129,10 @@ KeyLockTypeInv ==
   key_lock \in [KEY -> SUBSET [ts: Pos, for_update_ts: Nat, primary: KEY]]
 
 KeyWriteTypeInv ==
-  key_write \in [KEY -> 
+  key_write \in [KEY ->
     SUBSET [ts: Pos, type: {"write", "rollback"}, start_ts: Pos]
   ]
-  
+
 KeyWriteStartTsInv ==
   \A k \in DOMAIN key_write:
     LET
@@ -142,18 +142,18 @@ KeyWriteStartTsInv ==
       \/ IF rec.type = "write"
          THEN rec.ts > rec.start_ts
          ELSE rec.type = "rollback" /\ rec.ts = rec.start_ts
-  
+
 KeyLastReadTsTypeInv ==
   key_last_read_ts \in [KEY -> Nat]
- 
+
 MsgTypeInv ==
   msg \subseteq (
     [c: CLIENT, type: {"lock", "prewrite"}, key: KEY,
      start_ts: Pos, for_update_ts: Pos] \union
     [c: CLIENT, type: {"commit"}, key: KEY, commit_ts: Pos] \union
     [c: CLIENT, type: {"rollback"}, key: KEY]
-  )                 
-  
+  )
+
 TypeInvariant ==
   /\ NextTsTypeInv
   /\ ClientStateTypeInv
@@ -165,5 +165,5 @@ TypeInvariant ==
   /\ KeyWriteStartTsInv
   /\ KeyLastReadTsTypeInv
   /\ MsgTypeInv
-       
+
 =============================================================================
