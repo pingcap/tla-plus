@@ -65,22 +65,39 @@ Pos == {x \in Nat : x > 0}
 
 -----------------------------------------------------------------------------
 
+Start(c) ==
+  /\ client_state[c] = "init"
+  /\ next_ts' = next_ts + 1
+  /\ \E ks \in SUBSET KEY:
+       \E primary \in ks:
+         client_key' =
+           [client_key EXCEPT 
+             ![c] = [primary |-> primary,
+                     secondary |-> ks \ {primary},
+                     pessimistic |-> ks,
+                     pending |-> ks]
+           ]
+  /\ client_state' = [client_state EXCEPT ![c] = "working"]
+  /\ client_ts' = [client_ts EXCEPT ![c].start_ts = next_ts']
+  /\ UNCHANGED <<key_vars, msg>>
+
 Init ==
     /\ next_ts = 1
     /\ client_state = [c \in CLIENT |-> "init"]
     /\ client_ts = [c \in CLIENT |-> [start_ts |-> 0,
                                       for_update_ts |-> 0,
-                                      commit_ts |-> 0]
-                   ]
+                                      commit_ts |-> 0]]
     /\ client_key = [c \in CLIENT |-> {}]
     /\ key_lock = [k \in KEY |-> {}]
     /\ key_data = [k \in KEY |-> {}]
     /\ key_write = [k \in KEY |-> {}]
     /\ key_last_read_ts = [k \in KEY |-> 0]
     /\ msg = {}
-    
-Next ==
-  UNCHANGED <<client_vars, key_vars, vars>>
+
+ClientOp(c) ==
+  \/ Start(c)
+      
+Next == \E c \in CLIENT : ClientOp(c)
 
 -----------------------------------------------------------------------------
 
@@ -97,14 +114,13 @@ ClientTsTypeInv ==
   [CLIENT -> [start_ts : Nat, for_update_ts: Nat, commit_ts : Nat]]
   
 ClientKeyTypeInv ==
-  client_key \in [
-    CLIENT -> {{}} \union [
-      primary: KEY,
-      secondary: SUBSET KEY,
-      pessimistic: SUBSET KEY,
-      pending : SUBSET KEY
-    ]
-  ]
+  \A c \in CLIENT:
+    \/ client_state[c] = "init"
+    \/ client_key[c] \in [primary: KEY,
+                secondary: SUBSET KEY,
+                pessimistic: SUBSET KEY,
+                pending : SUBSET KEY
+               ]
   
 KeyDataTypeInv ==
   key_data \in [KEY -> SUBSET [ts: Pos]]
