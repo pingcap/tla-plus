@@ -73,30 +73,9 @@ Range(m) == {m[i] : i \in DOMAIN m}
 
 -----------------------------------------------------------------------------
 
-\* Checks whether there is a lock of key $k$, whose $ts$ is less or equal than
-\* $ts$.
-hasLockLE(k, ts) ==
-  \E l \in key_lock[k] : l.ts <= ts
-
-\* Checks whether there is a lock of key $k$ with $ts$.
-hasLockEQ(k, ts) ==
-  \E l \in key_lock[k] : l.ts = ts
-
 \* find a stale lock for key k.
 findStaleLock(k, ts) ==
   {l \in key_lock[k] : l.for_update_ts = 0 /\ l.ts < ts}
-
-\* Returns the writes with start_ts equals to $ts$.
-findWriteWithStartTS(k, ts) ==
-  {w \in Range(key_write[k]) : (w.type = "write" /\ w.start_ts = ts)}
-
-\* Returns the writes with commit_ts equals to $ts$.
-findWriteWithCommitTS(k, ts) ==
-  {w \in Range(key_write[k]) : (w.type = "write" /\ w.ts = ts)}
-
-\* Returns TRUE if there is a rollback for key $k$ at timestamp $ts$.
-hasRollback(k, ts) ==
-  {r \in Range(key_write[k]) : (r.type = "rollback" /\ r.ts = ts)} # {}
 
 sendTxnStatus(c, k, ts, commit_ts) ==
   lock_resolver' = [lock_resolver EXCEPT
@@ -106,7 +85,10 @@ sendTxnStatus(c, k, ts, commit_ts) ==
   
 writeRollback(k, ts) ==
   key_write' = [key_write EXCEPT
-    ![k] = [ts |-> ts, type |-> "rollback", start_ts |-> ts]]
+    ![k] = @ \union {[ts |-> ts, type |-> "rollback", start_ts |-> ts]}]
+
+abortTxn(c) ==
+  client_state' = [client_state EXCEPT ![c] = "abort"]
   
 -----------------------------------------------------------------------------
 
@@ -142,7 +124,7 @@ CheckTxnStatus(c) ==
        LET
          unknown_lock ==
            {l \in lock : 
-             ~ \E s \in lock_resolver :
+             ~ \E s \in status :
                  /\ l.primary = s.primary 
                  /\ l.start_ts = s.start_ts}
        IN
@@ -173,12 +155,43 @@ ResolveLock(c) ==
          
 LockKey(c) ==
   /\ client_state[c] = "working"
-  /\ client_key[c].pessimistic # {}
-  /\ \E k \in client_key[c].pessimistic :
-       /\ msg' = msg \union 
-            {[c |-> c, type |-> "lock", key |-> k, primary |-> client_key[c].primary,
-             start_ts |-> client_ts[c].start_ts, for_update_ts |-> client_ts[c].for_update_ts]}
-       /\ UNCHANGED <<next_ts, client_vars, key_vars>>
+  /\ IF client_key[c].pessimistic = {}
+     THEN
+       /\ client_state' = [client_state EXCEPT ![c] = "prewriting"]
+       /\ UNCHANGED <<client_ts, client_key, lock_resolver, next_ts, key_vars, msg>>
+     ELSE
+       \E k \in client_key[c].pessimistic :
+         /\ msg' = msg \union 
+              {[c |-> c, type |-> "lock", key |-> k, primary |-> client_key[c].primary,
+               start_ts |-> client_ts[c].start_ts, for_update_ts |-> client_ts[c].for_update_ts]}
+         /\ UNCHANGED <<next_ts, client_vars, key_vars>>
+       
+Prewrite(c) ==
+  /\ client_state[c] = "prewriting"
+  /\ IF client_key[c].pending = {}
+     THEN
+       /\ client_state' = [client_state EXCEPT ![c] = "committing"]
+       /\ UNCHANGED <<client_ts, client_key, lock_resolver, next_ts, key_vars, msg>>
+     ELSE
+       \E k \in client_key[c].pending :
+         /\ msg' = msg \union 
+              {[c |-> c, type |-> "prewrite", key |-> k, primary |-> client_key[c].primary,
+               start_ts |-> client_ts[c].start_ts, for_update_ts |-> client_ts[c].for_update_ts]}
+         /\ UNCHANGED <<next_ts, client_vars, key_vars>>
+         
+Commit(c) ==
+  /\ client_state[c] = "committing"
+  /\ IF client_ts[c].commit_ts = 0
+     THEN
+       /\ next_ts' = next_ts + 1
+       /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = next_ts']
+     ELSE
+       UNCHANGED <<next_ts, client_ts>>
+  /\ msg' = msg \union
+       {[c |-> c, type |-> "commit", key |-> client_key[c].primary,
+         start_ts |-> client_ts[c].start_ts, commit_ts |-> client_ts'[c].commit_ts]}
+  /\ UNCHANGED <<client_state, client_key, lock_resolver, key_vars>>
+  
          
 ClientOp(c) ==
   \/ Start(c)
@@ -186,6 +199,8 @@ ClientOp(c) ==
   \/ CheckTxnStatus(c)
   \/ ResolveLock(c)
   \/ LockKey(c)
+  \/ Prewrite(c)
+  \/ Commit(c)
   
 DoRead(cmd) ==
   LET
@@ -221,7 +236,7 @@ DoCheckTxnStatus(cmd) ==
           LET
             rec == CHOOSE w \in write : w.type = "write"
           IN
-            /\ sendTxnStatus(c, k, ts, rec.commit_ts)
+            /\ sendTxnStatus(c, k, ts, rec.ts)
             /\ UNCHANGED <<client_state, client_ts, client_key, key_vars, next_ts, msg>>   
         ELSE
           IF \E w \in write : w.type = "rollback"
@@ -234,7 +249,7 @@ DoCheckTxnStatus(cmd) ==
             /\ UNCHANGED <<client_state, client_ts, client_key, key_data, key_lock, key_last_read_ts, next_ts, msg>>                          
       ELSE
         /\ key_lock' = [key_lock EXCEPT ![k] = {}]
-        /\ key_data' = [key_data EXCEPT ![k] = @ \ [ts |-> ts]]
+        /\ key_data' = [key_data EXCEPT ![k] = @ \ {[ts |-> ts]}]
         /\ writeRollback(k, ts)
         /\ sendTxnStatus(c, k, ts, 0)   
         /\ UNCHANGED <<client_state, client_ts, client_key, key_last_read_ts, next_ts, msg>>     
@@ -249,12 +264,56 @@ DoLockKey(cmd) ==
   IN
     IF key_lock[k] = {}
     THEN
-      /\ key_lock' = [key_lock EXCEPT ![k] = {[ts |-> ts, for_update_ts |-> for_update_ts, primary |-> primary]}]
-      /\ client_key' = [client_key EXCEPT ![c].pessimistic = @ \ {k}]
-      /\ UNCHANGED <<client_vars, key_data, key_write, key_last_read_ts, next_ts, msg>>
+      /\ key_lock' = [key_lock EXCEPT ![k] = {[ts |-> ts, for_update_ts |-> for_update_ts, primary |-> primary, pessimistic |-> TRUE]}]
+      /\ client_key' = [client_key EXCEPT ![c].pessimistic = @ \ {k}] \* may not change
+      /\ UNCHANGED <<client_state, client_ts, lock_resolver, key_data, key_write, key_last_read_ts, next_ts, msg>>
     ELSE
-      /\ lock_resolver' = [lock_resolver EXCEPT ![c].lock = @ \union key_lock[k]]
+      /\ lock_resolver' = [lock_resolver EXCEPT ![c].lock = @ \union {[key |-> k, primary |-> l.primary, start_ts |-> l.ts] : l \in key_lock[k]}]
       /\ UNCHANGED <<client_state, client_ts, client_key, key_vars, next_ts, msg>>
+      
+DoPrewrite(cmd) ==
+  LET
+    c == cmd.c
+    k == cmd.key
+    primary == cmd.primary
+    ts == cmd.start_ts
+    for_update_ts == cmd.for_update_ts
+  IN
+    IF
+      \/ key_lock[k] = {}
+      \/ \E l \in key_lock[k] : l.ts # ts
+    THEN
+      /\ abortTxn(c)
+      /\ UNCHANGED <<client_ts, client_key, lock_resolver, next_ts, key_vars, msg>>
+    ELSE
+      /\ key_lock' = [key_lock EXCEPT ![k] = {[ts |-> ts, for_update_ts |-> for_update_ts, primary |-> primary, pessimistic |-> FALSE]}]
+      /\ key_data' = [key_data EXCEPT ![k] = @ \union {[ts |-> ts]}]
+      /\ client_key' = [client_key EXCEPT ![c].pending = @ \ {k}] \* may not change
+      /\ UNCHANGED <<client_state, client_ts, lock_resolver, key_write, key_last_read_ts, next_ts, msg>>
+      
+DoCommit(cmd) ==
+  LET
+    c == cmd.c
+    k == cmd.key
+    start_ts == cmd.start_ts
+    commit_ts == cmd.commit_ts
+  IN
+    IF
+      \/ key_lock[k] = {}
+      \/ \E l \in key_lock[k] : l.ts # start_ts
+    THEN
+      IF \E w \in key_write[k] : w.start_ts = start_ts /\ w.type = "write"
+      THEN
+        /\ client_state' = [client_state EXCEPT ![c] = "committed"]
+        /\ UNCHANGED <<client_ts, client_key, lock_resolver, next_ts, key_vars, msg>>
+      ELSE
+        /\ client_state' = [client_state EXCEPT ![c] = "aborted"]
+        /\ UNCHANGED <<client_ts, client_key, lock_resolver, next_ts, key_vars, msg>>
+    ELSE
+      /\ client_state' = [client_state EXCEPT ![c] = "committed"]
+      /\ key_lock' = [key_lock EXCEPT ![k] = {}]
+      /\ key_write' = [key_write EXCEPT ![k] = @ \union {[ts |-> commit_ts, type |-> "write", start_ts |-> start_ts]}]
+      /\ UNCHANGED <<client_ts, client_key, lock_resolver, next_ts, key_data, key_last_read_ts, msg>>
 
 ServerOp(cmd) ==
   \/ /\ cmd.type = "read"
@@ -263,6 +322,10 @@ ServerOp(cmd) ==
      /\ DoCheckTxnStatus(cmd)
   \/ /\ cmd.type = "lock"
      /\ DoLockKey(cmd)
+  \/ /\ cmd.type = "prewrite"
+     /\ DoPrewrite(cmd)
+  \/ /\ cmd.type = "commit"
+     /\ DoCommit(cmd)
 
 Init ==
     /\ next_ts = 1
@@ -313,7 +376,7 @@ KeyDataTypeInv ==
   key_data \in [KEY -> SUBSET [ts : Pos]]
 
 KeyLockTypeInv ==
-  key_lock \in [KEY -> SUBSET [ts : Pos, for_update_ts : Nat, primary : KEY]]
+  key_lock \in [KEY -> SUBSET [ts : Pos, for_update_ts : Nat, primary : KEY, pessimistic : BOOLEAN]]
 
 KeyWriteTypeInv ==
   key_write \in [KEY ->
