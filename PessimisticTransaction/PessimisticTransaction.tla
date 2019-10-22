@@ -1,6 +1,6 @@
 ----------------------- MODULE PessimisticTransaction -----------------------
 
-EXTENDS Integers
+EXTENDS Integers, TLC
 
 \* The set of transaction keys.
 CONSTANTS KEY
@@ -25,6 +25,12 @@ VARIABLES client_ts
 \* denotes the keys that are pending for prewrite.
 VARIABLES client_key
 
+\* lock_resolver[c] is a record of [lock: {[key, primary, start_ts]},
+\* status: {[primary, start_ts, commit_ts]}]. When client c encounters
+\* a lock, the lock will be added to the lock field. When there are locks
+\* in the record, client c may resolve the locks.
+VARIABLES lock_resolver
+
 \* key_data[k] is the set of multi-version data of the key.
 \* Since we don't care about the concrete value of data, a record of
 \* [ts: start_ts] is sufficient to represent one data version.
@@ -46,8 +52,8 @@ VARIABLES key_write
 \* key_last_read_ts is for verifying snapshot isolation invariant. It should
 \* not appear in a real-world implementation.
 \*
-\* key_last_read_ts[k] denotes the last read timestamp for key k, this
-\* should be monotonic.
+\* key_last_read_ts[k] denotes the last read timestamp for key k.
+\* The commit_ts of a successful commit should greater then the last read_ts.
 VARIABLES key_last_read_ts
 
 \* The set of all messages sent by clients. To simulate message resending,
@@ -55,7 +61,7 @@ VARIABLES key_last_read_ts
 \* pick any message in the set to execute.
 VARIABLES msg
 
-client_vars == <<client_state, client_ts, client_key>>
+client_vars == <<client_state, client_ts, client_key, lock_resolver>>
 key_vars == <<key_data, key_lock, key_write, key_last_read_ts>>
 vars == <<next_ts, client_vars, key_vars, msg>>
 
@@ -63,13 +69,52 @@ vars == <<next_ts, client_vars, key_vars, msg>>
 
 Pos == {x \in Nat : x > 0}
 
+Range(m) == {m[i] : i \in DOMAIN m}
+
+-----------------------------------------------------------------------------
+
+\* Checks whether there is a lock of key $k$, whose $ts$ is less or equal than
+\* $ts$.
+hasLockLE(k, ts) ==
+  \E l \in key_lock[k] : l.ts <= ts
+
+\* Checks whether there is a lock of key $k$ with $ts$.
+hasLockEQ(k, ts) ==
+  \E l \in key_lock[k] : l.ts = ts
+
+\* find a stale lock for key k.
+findStaleLock(k, ts) ==
+  {l \in key_lock[k] : l.for_update_ts = 0 /\ l.ts < ts}
+
+\* Returns the writes with start_ts equals to $ts$.
+findWriteWithStartTS(k, ts) ==
+  {w \in Range(key_write[k]) : (w.type = "write" /\ w.start_ts = ts)}
+
+\* Returns the writes with commit_ts equals to $ts$.
+findWriteWithCommitTS(k, ts) ==
+  {w \in Range(key_write[k]) : (w.type = "write" /\ w.ts = ts)}
+
+\* Returns TRUE if there is a rollback for key $k$ at timestamp $ts$.
+hasRollback(k, ts) ==
+  {r \in Range(key_write[k]) : (r.type = "rollback" /\ r.ts = ts)} # {}
+
+sendTxnStatus(c, k, ts, commit_ts) ==
+  lock_resolver' = [lock_resolver EXCEPT
+    ![c].status = @ \union {[primary |-> k,
+                             start_ts |-> ts,
+                             commit_ts |-> commit_ts]}]
+  
+writeRollback(k, ts) ==
+  key_write' = [key_write EXCEPT
+    ![k] = [ts |-> ts, type |-> "rollback", start_ts |-> ts]]
+  
 -----------------------------------------------------------------------------
 
 Start(c) ==
   /\ client_state[c] = "init"
   /\ next_ts' = next_ts + 1
   /\ \E ks \in SUBSET KEY:
-       \E primary \in ks:
+       \E primary \in ks :
          client_key' =
            [client_key EXCEPT
              ![c] = [primary |-> primary,
@@ -78,8 +123,146 @@ Start(c) ==
                      pending |-> ks]
            ]
   /\ client_state' = [client_state EXCEPT ![c] = "working"]
-  /\ client_ts' = [client_ts EXCEPT ![c].start_ts = next_ts']
-  /\ UNCHANGED <<key_vars, msg>>
+  /\ client_ts' = [client_ts EXCEPT ![c].start_ts = next_ts', ![c].for_update_ts = next_ts']
+  /\ UNCHANGED <<lock_resolver, key_vars, msg>>
+  
+Read(c) ==
+  /\ client_state[c] = "working"
+  /\ \E k \in KEY :
+       /\ msg' = msg \union 
+            {[c |-> c, type |-> "read", key |-> k, start_ts |-> client_ts[c].start_ts]}
+       /\ UNCHANGED <<next_ts, client_vars, key_vars>>
+         
+CheckTxnStatus(c) ==
+  /\ client_state[c] \in {"working", "prewriting"}
+  /\ LET
+       lock == lock_resolver[c].lock
+       status == lock_resolver[c].status
+     IN
+       LET
+         unknown_lock ==
+           {l \in lock : 
+             ~ \E s \in lock_resolver :
+                 /\ l.primary = s.primary 
+                 /\ l.start_ts = s.start_ts}
+       IN
+         /\ msg' = msg \union {
+              [c |-> c, type |-> "cleanup",
+               key |-> l.primary, start_ts |-> l.start_ts] : l \in unknown_lock
+            }
+         /\ UNCHANGED <<next_ts, client_vars, key_vars>>
+         
+ResolveLock(c) ==
+  /\ client_state[c] \in {"working", "prewriting"}
+  /\ LET
+       lock == lock_resolver[c].lock
+       status == lock_resolver[c].status
+     IN
+       LET
+         txn_with_lock ==
+           {s \in status : 
+             \E l \in lock :
+               /\ l.primary = s.primary 
+               /\ l.start_ts = s.start_ts}
+       IN
+         /\ msg' = msg \union {
+              [c |-> c, type |-> "resolve", key |-> txn.primary,
+               start_ts |-> txn.start_ts, commit_ts |-> txn.commit_ts] : txn \in txn_with_lock
+            }
+         /\ UNCHANGED <<next_ts, client_vars, key_vars>>
+         
+LockKey(c) ==
+  /\ client_state[c] = "working"
+  /\ client_key[c].pessimistic # {}
+  /\ \E k \in client_key[c].pessimistic :
+       /\ msg' = msg \union 
+            {[c |-> c, type |-> "lock", key |-> k, primary |-> client_key[c].primary,
+             start_ts |-> client_ts[c].start_ts, for_update_ts |-> client_ts[c].for_update_ts]}
+       /\ UNCHANGED <<next_ts, client_vars, key_vars>>
+         
+ClientOp(c) ==
+  \/ Start(c)
+  \/ Read(c)
+  \/ CheckTxnStatus(c)
+  \/ ResolveLock(c)
+  \/ LockKey(c)
+  
+DoRead(cmd) ==
+  LET
+    c == cmd.c
+    k == cmd.key
+    ts == cmd.start_ts
+  IN
+    LET
+      stale_lock == findStaleLock(k, ts)
+    IN
+      IF stale_lock = {}
+      THEN
+        /\ key_last_read_ts' = [key_last_read_ts EXCEPT ![k] = ts]
+        /\ UNCHANGED <<client_vars, key_data, key_lock, key_write, next_ts, msg>>
+      ELSE
+        /\ lock_resolver' = [lock_resolver EXCEPT ![c].lock = @ \union stale_lock]
+        /\ UNCHANGED <<client_state, client_ts, client_key, key_vars, next_ts, msg>>
+        
+DoCheckTxnStatus(cmd) ==
+  LET
+    c == cmd.c
+    k == cmd.key
+    ts == cmd.start_ts
+  IN
+    LET
+      lock == {l \in key_lock[k] : l.ts = ts}
+      write == {w \in key_write[k] : w.start_ts = ts}
+    IN
+      IF lock = {}
+      THEN
+        IF \E w \in write : w.type = "write"
+        THEN
+          LET
+            rec == CHOOSE w \in write : w.type = "write"
+          IN
+            /\ sendTxnStatus(c, k, ts, rec.commit_ts)
+            /\ UNCHANGED <<client_state, client_ts, client_key, key_vars, next_ts, msg>>   
+        ELSE
+          IF \E w \in write : w.type = "rollback"
+          THEN
+            /\ sendTxnStatus(c, k, ts, 0)
+            /\ UNCHANGED <<client_state, client_ts, client_key, key_vars, next_ts, msg>>
+          ELSE
+            /\ writeRollback(k, ts)
+            /\ sendTxnStatus(c, k, ts, 0)
+            /\ UNCHANGED <<client_state, client_ts, client_key, key_data, key_lock, key_last_read_ts, next_ts, msg>>                          
+      ELSE
+        /\ key_lock' = [key_lock EXCEPT ![k] = {}]
+        /\ key_data' = [key_data EXCEPT ![k] = @ \ [ts |-> ts]]
+        /\ writeRollback(k, ts)
+        /\ sendTxnStatus(c, k, ts, 0)   
+        /\ UNCHANGED <<client_state, client_ts, client_key, key_last_read_ts, next_ts, msg>>     
+        
+DoLockKey(cmd) ==
+  LET
+    c == cmd.c
+    k == cmd.key
+    primary == cmd.primary
+    ts == cmd.start_ts
+    for_update_ts == cmd.for_update_ts
+  IN
+    IF key_lock[k] = {}
+    THEN
+      /\ key_lock' = [key_lock EXCEPT ![k] = {[ts |-> ts, for_update_ts |-> for_update_ts, primary |-> primary]}]
+      /\ client_key' = [client_key EXCEPT ![c].pessimistic = @ \ {k}]
+      /\ UNCHANGED <<client_vars, key_data, key_write, key_last_read_ts, next_ts, msg>>
+    ELSE
+      /\ lock_resolver' = [lock_resolver EXCEPT ![c].lock = @ \union key_lock[k]]
+      /\ UNCHANGED <<client_state, client_ts, client_key, key_vars, next_ts, msg>>
+
+ServerOp(cmd) ==
+  \/ /\ cmd.type = "read"
+     /\ DoRead(cmd)
+  \/ /\ cmd.type = "cleanup"
+     /\ DoCheckTxnStatus(cmd)
+  \/ /\ cmd.type = "lock"
+     /\ DoLockKey(cmd)
 
 Init ==
     /\ next_ts = 1
@@ -88,16 +271,16 @@ Init ==
                                       for_update_ts |-> 0,
                                       commit_ts |-> 0]]
     /\ client_key = [c \in CLIENT |-> {}]
+    /\ lock_resolver = [c \in CLIENT |-> [lock |-> {}, status |-> {}]]
     /\ key_lock = [k \in KEY |-> {}]
     /\ key_data = [k \in KEY |-> {}]
     /\ key_write = [k \in KEY |-> {}]
     /\ key_last_read_ts = [k \in KEY |-> 0]
     /\ msg = {}
 
-ClientOp(c) ==
-  \/ Start(c)
-
-Next == \E c \in CLIENT : ClientOp(c)
+Next == 
+  \/ \E cmd \in msg : ServerOp(cmd)
+  \/ \E c \in CLIENT : ClientOp(c)
 
 -----------------------------------------------------------------------------
 
@@ -111,26 +294,30 @@ ClientStateTypeInv ==
 
 ClientTsTypeInv ==
   client_ts \in
-  [CLIENT -> [start_ts : Nat, for_update_ts: Nat, commit_ts : Nat]]
+  [CLIENT -> [start_ts : Nat, for_update_ts : Nat, commit_ts : Nat]]
 
 ClientKeyTypeInv ==
-  \A c \in CLIENT:
+  \A c \in CLIENT :
     \/ client_state[c] = "init"
-    \/ client_key[c] \in [primary: KEY,
-                secondary: SUBSET KEY,
-                pessimistic: SUBSET KEY,
-                pending : SUBSET KEY
-               ]
+    \/ client_key[c] \in [primary : KEY,
+                          secondary : SUBSET KEY,
+                          pessimistic : SUBSET KEY,
+                          pending : SUBSET KEY]
+
+LockResolverTypeInv ==
+  \A c \in CLIENT :
+    /\ lock_resolver[c].lock \subseteq [key : KEY, primary : KEY, start_ts: Pos]
+    /\ lock_resolver[c].status \subseteq [primary : KEY, start_ts : Pos, commit_ts : Nat]
 
 KeyDataTypeInv ==
-  key_data \in [KEY -> SUBSET [ts: Pos]]
+  key_data \in [KEY -> SUBSET [ts : Pos]]
 
 KeyLockTypeInv ==
-  key_lock \in [KEY -> SUBSET [ts: Pos, for_update_ts: Nat, primary: KEY]]
+  key_lock \in [KEY -> SUBSET [ts : Pos, for_update_ts : Nat, primary : KEY]]
 
 KeyWriteTypeInv ==
   key_write \in [KEY ->
-    SUBSET [ts: Pos, type: {"write", "rollback"}, start_ts: Pos]
+    SUBSET [ts : Pos, type : {"write", "rollback"}, start_ts : Pos]
   ]
 
 KeyWriteStartTsInv ==
@@ -148,10 +335,12 @@ KeyLastReadTsTypeInv ==
 
 MsgTypeInv ==
   msg \subseteq (
-    [c: CLIENT, type: {"lock", "prewrite"}, key: KEY,
-     start_ts: Pos, for_update_ts: Pos] \union
-    [c: CLIENT, type: {"commit"}, key: KEY, commit_ts: Pos] \union
-    [c: CLIENT, type: {"rollback"}, key: KEY]
+    [c : CLIENT, type : {"lock", "prewrite"}, key : KEY, primary: KEY,
+     start_ts : Pos, for_update_ts : Pos] \union
+    [c : CLIENT, type: {"commit"}, key : KEY, start_ts : Pos, commit_ts : Pos] \union
+    [c : CLIENT, type: {"resolve"}, key : KEY, start_ts : Pos, commit_ts : Nat] \union
+    [c : CLIENT, type: {"read", "cleanup"}, key : KEY, start_ts : Pos] \union
+    [type : {"rollback"}, key : SUBSET KEY, start_ts: Pos]
   )
 
 TypeInvariant ==
@@ -159,6 +348,7 @@ TypeInvariant ==
   /\ ClientStateTypeInv
   /\ ClientTsTypeInv
   /\ ClientKeyTypeInv
+  /\ LockResolverTypeInv
   /\ KeyDataTypeInv
   /\ KeyLockTypeInv
   /\ KeyWriteTypeInv

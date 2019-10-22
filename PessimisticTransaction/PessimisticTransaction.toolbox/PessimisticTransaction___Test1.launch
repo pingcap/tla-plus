@@ -5,23 +5,21 @@
     <stringAttribute key="distributedNetworkInterface" value="192.168.220.40"/>
     <intAttribute key="distributedNodesCount" value="1"/>
     <stringAttribute key="distributedTLC" value="off"/>
-    <intAttribute key="fpIndex" value="37"/>
+    <intAttribute key="fpIndex" value="108"/>
     <intAttribute key="maxHeapSize" value="25"/>
     <stringAttribute key="modelBehaviorInit" value="Init"/>
     <stringAttribute key="modelBehaviorNext" value="Next"/>
     <stringAttribute key="modelBehaviorSpec" value=""/>
     <intAttribute key="modelBehaviorSpecType" value="2"/>
-    <stringAttribute key="modelBehaviorVars" value="key_last_read_ts, client_ts, client_state, key_lock, key_write, msg, client_key, next_ts, key_data"/>
+    <stringAttribute key="modelBehaviorVars" value="msg, key_data, key_lock, next_ts, client_state, key_last_read_ts, client_key, client_ts, lock_resolver, key_write"/>
     <stringAttribute key="modelComments" value=""/>
-    <booleanAttribute key="modelCorrectnessCheckDeadlock" value="false"/>
-    <listAttribute key="modelCorrectnessInvariants">
-        <listEntry value="1TypeInvariant"/>
-    </listAttribute>
+    <booleanAttribute key="modelCorrectnessCheckDeadlock" value="true"/>
+    <listAttribute key="modelCorrectnessInvariants"/>
     <listAttribute key="modelCorrectnessProperties"/>
     <stringAttribute key="modelExpressionEval" value=""/>
     <listAttribute key="modelParameterConstants">
-        <listEntry value="KEY;;{1, 2};0;0"/>
-        <listEntry value="CLIENT;;{c1, c2};1;0"/>
+        <listEntry value="KEY;;{k1, k2};1;1"/>
+        <listEntry value="CLIENT;;{c1, c2};1;1"/>
     </listAttribute>
     <intAttribute key="numberOfWorkers" value="6"/>
     <stringAttribute key="result.mail.address" value=""/>
