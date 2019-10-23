@@ -80,7 +80,9 @@ rollback(k, ts) ==
        ![k] = @ \union {[ts |-> ts, type |-> "rollback", start_ts |-> ts]}]
        
 commit(k, start_ts, commit_ts) ==
-  /\ key_lock' = [key_lock EXCEPT ![k] = {}]
+  /\ IF \E l \in key_lock[k] : l.ts = start_ts
+     THEN key_lock' = [key_lock EXCEPT ![k] = {}]
+     ELSE UNCHANGED key_lock
   /\ key_write' = [key_write EXCEPT ![k] = @ \union {[ts |-> commit_ts, type |-> "write", start_ts |-> start_ts]}]
   /\ UNCHANGED key_data
 
@@ -103,12 +105,6 @@ Start(c) ==
   /\ client_state' = [client_state EXCEPT ![c] = "working"]
   /\ client_ts' = [client_ts EXCEPT ![c].start_ts = next_ts, ![c].for_update_ts = next_ts]
   /\ UNCHANGED <<key_vars, msg>>
-  
-Read(ts) ==
-  /\ \E k \in KEY :
-       /\ msg' = msg \union 
-            {[type |-> "read", key |-> k, ts |-> ts]}
-       /\ UNCHANGED <<next_ts, client_vars, key_vars>>
          
 LockKey(c) ==
   /\ client_state[c] = "working"
@@ -166,7 +162,9 @@ DoRead(cmd) ==
     IN
       IF stale_lock = {}
       THEN
-        /\ key_last_read_ts' = [key_last_read_ts EXCEPT ![k] = ts]
+        /\ IF key_last_read_ts[k] < ts
+           THEN key_last_read_ts' = [key_last_read_ts EXCEPT ![k] = ts]
+           ELSE UNCHANGED key_last_read_ts
         /\ UNCHANGED <<client_vars, key_data, key_lock, key_write, next_ts, msg>>
       ELSE
         /\ msg' = msg \union
@@ -188,10 +186,11 @@ DoCleanup(cmd) ==
              {[type |-> "resolve", primary |-> k, start_ts |-> ts, commit_ts |-> t.ts] : t \in committed}
         /\ UNCHANGED <<next_ts, client_vars, key_vars>>
       ELSE
-        /\ msg' = msg \union
-             {[type |-> "resolve", primary |-> k, start_ts |-> ts, commit_ts |-> 0]}
         /\ rollback(k, ts)
         /\ UNCHANGED <<key_last_read_ts, next_ts, client_vars>>
+        /\ \/ msg' = msg \union
+                {[type |-> "resolve", primary |-> k, start_ts |-> ts, commit_ts |-> 0]}
+           \/ UNCHANGED msg
 
 DoResolve(cmd) ==
   /\ IF cmd.commit_ts = 0
@@ -221,11 +220,12 @@ DoLockKey(cmd) ==
     IF key_lock[k] = {}
     THEN
       /\ key_lock' = [key_lock EXCEPT ![k] = {[ts |-> ts, for_update_ts |-> for_update_ts, primary |-> primary, pessimistic |-> TRUE]}]
-      /\ client_key' = [client_key EXCEPT ![c].pessimistic = @ \ {k}] \* may not change
       /\ UNCHANGED <<client_state, client_ts, key_data, key_write, key_last_read_ts, next_ts, msg>>
+      /\ \/ client_key' = [client_key EXCEPT ![c].pessimistic = @ \ {k}]
+         \/ UNCHANGED client_key
     ELSE
       /\ msg' = msg \union
-             {[type |-> "cleanup", primary |-> l.primary, start_ts |-> l.ts] : l \in key_lock[k]} \* may not change
+             {[type |-> "cleanup", primary |-> l.primary, start_ts |-> l.ts] : l \in key_lock[k]}
       /\ UNCHANGED <<client_state, client_ts, client_key, key_vars, next_ts>>
       
 DoPrewrite(cmd) ==
@@ -245,7 +245,8 @@ DoPrewrite(cmd) ==
     ELSE
       /\ key_lock' = [key_lock EXCEPT ![k] = {[ts |-> ts, for_update_ts |-> for_update_ts, primary |-> primary, pessimistic |-> FALSE]}]
       /\ key_data' = [key_data EXCEPT ![k] = @ \union {[ts |-> ts]}]
-      /\ client_key' = [client_key EXCEPT ![c].pending = @ \ {k}] \* may not change
+      /\ \/ client_key' = [client_key EXCEPT ![c].pending = @ \ {k}]
+         \/ UNCHANGED client_key
       /\ UNCHANGED <<client_state, client_ts, key_write, key_last_read_ts, next_ts, msg>>
       
 DoCommit(cmd) ==
@@ -255,21 +256,17 @@ DoCommit(cmd) ==
     start_ts == cmd.start_ts
     commit_ts == cmd.commit_ts
   IN
-    IF
-      \/ key_lock[k] = {}
-      \/ \E l \in key_lock[k] : l.ts # start_ts
+    IF \/ \E l \in key_lock[k] : l.ts = start_ts
+       \/ \E w \in key_write[k] : w.start_ts = start_ts /\ w.type = "write"
     THEN
-      IF \E w \in key_write[k] : w.start_ts = start_ts /\ w.type = "write"
-      THEN
-        /\ client_state' = [client_state EXCEPT ![c] = "committed"]
-        /\ UNCHANGED <<client_ts, client_key, next_ts, key_vars, msg>>
-      ELSE
-        /\ client_state' = [client_state EXCEPT ![c] = "aborted"]
-        /\ UNCHANGED <<client_ts, client_key, next_ts, key_vars, msg>>
-    ELSE
-      /\ client_state' = [client_state EXCEPT ![c] = "committed"]
       /\ commit(k, start_ts, commit_ts)
+      /\ \/ client_state' = [client_state EXCEPT ![c] = "committed"]
+         \/ UNCHANGED client_state
       /\ UNCHANGED <<client_ts, client_key, next_ts, key_last_read_ts, msg>>
+    ELSE
+      /\ \/ client_state' = [client_state EXCEPT ![c] = "aborted"]
+         \/ UNCHANGED client_state
+      /\ UNCHANGED <<client_ts, client_key, next_ts, key_vars, msg>>
 
 ServerOp(cmd) ==
   \/ /\ cmd.type = "read"
@@ -284,6 +281,12 @@ ServerOp(cmd) ==
      /\ DoPrewrite(cmd)
   \/ /\ cmd.type = "commit"
      /\ DoCommit(cmd)
+     
+Read(ts) ==
+  /\ \E k \in KEY :
+       /\ msg' = msg \union 
+            {[type |-> "read", key |-> k, ts |-> ts]}
+       /\ UNCHANGED <<next_ts, client_vars, key_vars>>
 
 Init ==
     /\ next_ts = 1
@@ -369,5 +372,9 @@ TypeInvariant ==
   /\ KeyWriteStartTsInv
   /\ KeyLastReadTsTypeInv
   /\ MsgTypeInv
+  
+-----------------------------------------------------------------------------
+
+
 
 =============================================================================
