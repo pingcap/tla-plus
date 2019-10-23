@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <launchConfiguration type="org.lamport.tla.toolbox.tool.tlc.modelCheck">
     <stringAttribute key="TLCCmdLineParameters" value=""/>
-    <intAttribute key="collectCoverage" value="0"/>
+    <intAttribute key="collectCoverage" value="1"/>
     <stringAttribute key="configurationName" value="Test1"/>
     <booleanAttribute key="deferLiveness" value="false"/>
     <intAttribute key="dfidDepth" value="100"/>
@@ -12,7 +12,7 @@
     <stringAttribute key="distributedTLC" value="off"/>
     <stringAttribute key="distributedTLCVMArgs" value=""/>
     <intAttribute key="fpBits" value="1"/>
-    <intAttribute key="fpIndex" value="23"/>
+    <intAttribute key="fpIndex" value="91"/>
     <booleanAttribute key="fpIndexRandom" value="true"/>
     <intAttribute key="maxHeapSize" value="75"/>
     <intAttribute key="maxSetSize" value="1000000"/>
@@ -21,10 +21,12 @@
     <stringAttribute key="modelBehaviorNext" value="Next"/>
     <stringAttribute key="modelBehaviorSpec" value=""/>
     <intAttribute key="modelBehaviorSpecType" value="2"/>
-    <stringAttribute key="modelBehaviorVars" value="msg, key_data, key_lock, next_ts, client_state, key_last_read_ts, client_key, client_ts, lock_resolver, key_write"/>
+    <stringAttribute key="modelBehaviorVars" value="msg, key_data, key_lock, next_ts, client_state, key_last_read_ts, client_key, client_ts, key_write"/>
     <stringAttribute key="modelComments" value=""/>
     <booleanAttribute key="modelCorrectnessCheckDeadlock" value="true"/>
-    <listAttribute key="modelCorrectnessInvariants"/>
+    <listAttribute key="modelCorrectnessInvariants">
+        <listEntry value="1TypeInvariant"/>
+    </listAttribute>
     <listAttribute key="modelCorrectnessProperties"/>
     <intAttribute key="modelEditorOpenTabs" value="4"/>
     <stringAttribute key="modelExpressionEval" value=""/>
