@@ -51,7 +51,7 @@ VARIABLES key_write
 VARIABLES key_last_read_ts
 
 \* The set of all messages sent by clients. To simulate message resending,
-\* client messages are inserted to the set and never deleted. The server can
+\* client messages are inserted into the set and never deleted. The server can
 \* pick any message in the set to execute.
 VARIABLES msg
 
@@ -67,45 +67,60 @@ Range(m) == {m[i] : i \in DOMAIN m}
 
 -----------------------------------------------------------------------------
 
-\* find a stale lock for key k.
+\* Find a stale lock which blocks the read for key k.
 findStaleLock(k, ts) ==
   {l \in key_lock[k] : l.pessimistic = FALSE /\ l.ts < ts}
   
+\* Rollback key k in the transaction starting at ts
 rollback(k, ts) ==
+  \* If the existing lock has the same ts, unlock it.
   /\ IF \E l \in key_lock[k] : l.ts = ts
      THEN key_lock' = [key_lock EXCEPT ![k] = {}]
      ELSE UNCHANGED key_lock
   /\ key_data' = [key_data EXCEPT ![k] = @ \ {[ts |-> ts]}]
+  \* Write a rollback in the write column.
+  \* TODO: collapse rollback
   /\ key_write' = [key_write EXCEPT
        ![k] = @ \union {[ts |-> ts, type |-> "rollback", start_ts |-> ts]}]
-       
+
+\* Commit key k       
 commit(k, start_ts, commit_ts) ==
   /\ IF \E l \in key_lock[k] : l.ts = start_ts
-     THEN 
+     THEN
+       \* Write the write column and unlock the lock iff the lock exists
        /\ key_lock' = [key_lock EXCEPT ![k] = {}]
        /\ key_write' = [key_write EXCEPT ![k] = @ \union {[ts |-> commit_ts, type |-> "write", start_ts |-> start_ts]}]
-       /\ Assert(key_last_read_ts[k] < commit_ts, TRUE)
+       \* Assert we don't violate snapshot isolation
+       /\ Assert(key_last_read_ts[k] < commit_ts, <<key_last_read_ts[k], commit_ts>>)
      ELSE
        UNCHANGED <<key_lock, key_write>>
   /\ UNCHANGED key_data
 
+\* Change the state of client c to aborted
 abortTxn(c) ==
-  client_state' = [client_state EXCEPT ![c] = "aborted"]
+  /\ ~ client_state[c] \in {"committed", "undetermined"}
+  /\ client_state' = [client_state EXCEPT ![c] = "aborted"]
+
+\* Change the state of client c to undetermined due to lost commit RPC.
+undetermine(c) ==
+  /\ client_state[c] = "committing"
+  /\ client_state' = [client_state EXCEPT ![c] = "undetermined"]
   
 -----------------------------------------------------------------------------
 
 Start(c) ==
   /\ client_state[c] = "init"
   /\ next_ts' = next_ts + 1
+  \* Select any key as the primary key
   /\ \E primary \in KEY :
        client_key' =
          [client_key EXCEPT
            ![c] = [primary |-> primary,
                    secondary |-> KEY \ {primary},
-                   pessimistic |-> KEY,
-                   pending |-> KEY]
-         ]
+                   pessimistic |-> KEY, \* Assume we need to acquire pessimistic locks for all keys
+                   pending |-> KEY]]
   /\ client_state' = [client_state EXCEPT ![c] = "working"]
+  \* The for_update_ts is initialized to be the same as start_ts.
   /\ client_ts' = [client_ts EXCEPT ![c].start_ts = next_ts', ![c].for_update_ts = next_ts']
   /\ UNCHANGED <<key_vars, msg>>
          
@@ -113,9 +128,11 @@ LockKey(c) ==
   /\ client_state[c] = "working"
   /\ IF client_key[c].pessimistic = {}
      THEN
+       \* The client can prewrite after all pessimistic locks have been acquired.
        /\ client_state' = [client_state EXCEPT ![c] = "prewriting"]
        /\ UNCHANGED <<client_ts, client_key, next_ts, key_vars, msg>>
      ELSE
+       \* Select any unlocked key and acquire its pessimistic lock
        \E k \in client_key[c].pessimistic :
          /\ msg' = msg \union 
               {[c |-> c, type |-> "lock", key |-> k, primary |-> client_key[c].primary,
@@ -126,9 +143,11 @@ Prewrite(c) ==
   /\ client_state[c] = "prewriting"
   /\ IF client_key[c].pending = {}
      THEN
+       \* The client can commit the primary key after prewriting all keys.
        /\ client_state' = [client_state EXCEPT ![c] = "committing"]
        /\ UNCHANGED <<client_ts, client_key, next_ts, key_vars, msg>>
      ELSE
+       \* Select any pending key to prewrite
        \E k \in client_key[c].pending :
          /\ msg' = msg \union 
               {[c |-> c, type |-> "prewrite", key |-> k, primary |-> client_key[c].primary,
@@ -137,12 +156,14 @@ Prewrite(c) ==
          
 Commit(c) ==
   /\ client_state[c] = "committing"
+  \* Get a new ts as commit_ts
   /\ IF client_ts[c].commit_ts = 0
      THEN
        /\ next_ts' = next_ts + 1
        /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = next_ts']
      ELSE
        UNCHANGED <<next_ts, client_ts>>
+  \* Commit the primary key
   /\ msg' = msg \union
        {[c |-> c, type |-> "commit", key |-> client_key[c].primary,
          start_ts |-> client_ts[c].start_ts, commit_ts |-> client_ts'[c].commit_ts]}
@@ -154,6 +175,7 @@ ClientOp(c) ==
   \/ LockKey(c)
   \/ Prewrite(c)
   \/ Commit(c)
+  \* Committing secondary keys is ommitted
   
 DoRead ==
   \E cmd \in msg :
@@ -166,15 +188,20 @@ DoRead ==
            stale_lock == findStaleLock(k, ts)
          IN
            IF stale_lock = {}
+           \* Successfully read
            THEN
+             \* The client receives the read response, update the last read ts
              /\ IF key_last_read_ts[k] < ts
                 THEN key_last_read_ts' = [key_last_read_ts EXCEPT ![k] = ts]
                 ELSE UNCHANGED key_last_read_ts
+             \* To simulate the client fails to receive the read response
              /\ UNCHANGED <<client_vars, key_data, key_lock, key_write, next_ts, msg>>
            ELSE
+             \* When there is a blocking lock, the client may resolve the lock by cleanup.
              /\ msg' = msg \union
                   {[type |-> "cleanup", primary |-> l.primary, start_ts |-> l.ts] : l \in stale_lock}
              /\ UNCHANGED <<client_state, client_ts, client_key, key_vars, next_ts>>
+             \* Response loss leads to no state change
         
 DoCleanup ==
   \E cmd \in msg :
@@ -188,13 +215,17 @@ DoCleanup ==
           committed == {w \in key_write[k] : w.start_ts = ts /\ w.type = "write"}
         IN
           IF committed # {}
+          \* The transaction is already committed, so resolve locks using its commit_ts
           THEN
             /\ msg' = msg \union
                  {[type |-> "resolve", primary |-> k, start_ts |-> ts, commit_ts |-> t.ts] : t \in committed}
             /\ UNCHANGED <<next_ts, client_vars, key_vars>>
           ELSE
+            \* The transaction is not committed, so rollback the primary key.
             /\ rollback(k, ts)
             /\ UNCHANGED <<key_last_read_ts, next_ts, client_vars>>
+            \* The client may resolve locks using 0 as commit_ts. When the cleanup response is lost,
+            \* msg remains unchanged.
             /\ \/ msg' = msg \union
                     {[type |-> "resolve", primary |-> k, start_ts |-> ts, commit_ts |-> 0]}
                \/ UNCHANGED msg
@@ -204,12 +235,14 @@ DoResolve ==
     /\ cmd.type = "resolve"
     /\ IF cmd.commit_ts = 0
        THEN
+         \* rollback locks when commit_ts = 0
          \E k \in KEY :
            \E l \in key_lock[k] :
              /\ l.primary = cmd.primary
              /\ l.ts = cmd.start_ts
              /\ rollback(k, cmd.start_ts)
        ELSE
+         \* commit locks when commit_ts > 0
          \E k \in KEY :
            \E l \in key_lock[k] :
              /\ l.primary = cmd.primary
@@ -217,7 +250,7 @@ DoResolve ==
              /\ commit(k, cmd.start_ts, cmd.commit_ts)
     /\ UNCHANGED <<next_ts, client_vars, key_last_read_ts, msg>>    
           
-
+\* TODO: This action is too complex and concrete. Try to simplify it.
 DoLockKey ==
   \E cmd \in msg :
    /\ cmd.type = "lock"
@@ -227,11 +260,15 @@ DoLockKey ==
         primary == cmd.primary
         ts == cmd.start_ts
         for_update_ts == cmd.for_update_ts
+        \* Write or overwrite the pessimistic lock
         writeLock ==
               /\ key_lock' = [key_lock EXCEPT ![k] = {[ts |-> ts, for_update_ts |-> for_update_ts, primary |-> primary, pessimistic |-> TRUE]}]
               /\ UNCHANGED <<client_state, client_ts, key_data, key_write, key_last_read_ts, next_ts, msg>>
+              \* Inform the client that the key is locked
               /\ \/ client_key' = [client_key EXCEPT ![c].pessimistic = @ \ {k}]
+                 \* client_key remains the same when the response is lost
                  \/ UNCHANGED client_key
+        \* Update the for_update_ts in the client with new_ts
         updateForUpdateTs(new_ts) ==
           IF new_ts > client_ts[c].for_update_ts
           THEN
@@ -242,33 +279,40 @@ DoLockKey ==
         IF key_lock[k] = {}
         THEN
           IF key_write[k] = {}
+          \* If no lock or write exists, we can always lock the key
           THEN writeLock
           ELSE
-            LET 
+            LET
+              \* Find the write record with biggest commit_ts
               latest == CHOOSE w \in key_write[k] : \A w2 \in key_write[k] : w.ts >= w2.ts
             IN
               IF latest.ts > for_update_ts
+              \* Update the client's for_update_ts when there is a newer commit.
+              \* Response loss causes no state change.
               THEN updateForUpdateTs(latest.ts)
               ELSE
                 IF \E w \in key_write[k] : w.start_ts = ts /\ w.type = "rollback"
+                \* If any key to be locked is rollbacked, abort the transaction.
+                \* TODO: Maybe it needn't be included in the spec.
                 THEN abortTxn(c) /\ UNCHANGED <<next_ts, client_ts, client_key, key_vars, msg>>
+                \* Otherwise we can lock the key.
                 ELSE writeLock
         ELSE
           LET
             l == CHOOSE l \in key_lock[k] : TRUE
           IN
             IF l.ts # ts
+            \* If there is a lock from another transaction, the client may cleanup the lock.
+            \* Response loss causes no state change.
             THEN                        
               /\ msg' = msg \union
                    {[type |-> "cleanup", primary |-> l.primary, start_ts |-> l.ts]}
               /\ UNCHANGED <<client_state, client_ts, client_key, key_vars, next_ts>>
             ELSE
-              IF l.pessimistic = FALSE
-              THEN UNCHANGED vars
-              ELSE
-                IF l.for_update_ts < for_update_ts
-                THEN writeLock
-                ELSE UNCHANGED vars
+              \* Only overwrite the lock when it's a pessimistic lock with smaller for_update_ts
+              /\ l.pessimistic
+              /\ l.for_update_ts < for_update_ts
+              /\ writeLock
       
 DoPrewrite ==
   \E cmd \in msg :
@@ -284,12 +328,16 @@ DoPrewrite ==
           \/ key_lock[k] = {}
           \/ \E l \in key_lock[k] : l.ts # ts
         THEN
+          \* Abort the transaction when its lock doesn't exist
           /\ abortTxn(c)
           /\ UNCHANGED <<client_ts, client_key, next_ts, key_vars, msg>>
         ELSE
+          \* Otherwise rewrite the existing lock to an optimistic lock
           /\ key_lock' = [key_lock EXCEPT ![k] = {[ts |-> ts, for_update_ts |-> for_update_ts, primary |-> primary, pessimistic |-> FALSE]}]
           /\ key_data' = [key_data EXCEPT ![k] = @ \union {[ts |-> ts]}]
+          \* Inform the client that the key is successfully prewritten
           /\ \/ client_key' = [client_key EXCEPT ![c].pending = @ \ {k}]
+             \* Simulate response loss
              \/ UNCHANGED client_key
           /\ UNCHANGED <<client_state, client_ts, key_write, key_last_read_ts, next_ts, msg>>
       
@@ -304,14 +352,20 @@ DoCommit ==
       IN
         IF \/ \E l \in key_lock[k] : l.ts = start_ts
            \/ \E w \in key_write[k] : w.start_ts = start_ts /\ w.type = "write"
+        \* Commit the key iff the prewritten key exists or it's a repeated commit
         THEN
           /\ commit(k, start_ts, commit_ts)
+          \* Change client state to committed.
           /\ \/ client_state' = [client_state EXCEPT ![c] = "committed"]
-             \/ UNCHANGED client_state
+             \* Commit response is lost
+             \/ undetermine(c)
           /\ UNCHANGED <<client_ts, client_key, next_ts, key_last_read_ts, msg>>
         ELSE
-          /\ \/ client_state' = [client_state EXCEPT ![c] = "aborted"]
-             \/ UNCHANGED client_state
+          \* The lock doesn't exist and the key is not committed, so commit fails.
+          /\ \/ /\ Assert(client_state[c] # "committed", client_state[c])
+                /\ abortTxn(c)
+             \* Commit response is lost
+             \/ undetermine(c)
           /\ UNCHANGED <<client_ts, client_key, next_ts, key_vars, msg>>
 
 ServerOp ==
@@ -321,13 +375,21 @@ ServerOp ==
   \/ DoLockKey
   \/ DoPrewrite
   \/ DoCommit
-     
+ 
 Read ==
-  \E ts \in 0..next_ts :
-    \E k \in KEY :
-      /\ msg' = msg \union 
-           {[type |-> "read", key |-> k, ts |-> ts]}
-      /\ UNCHANGED <<next_ts, client_vars, key_vars>>
+  \* Read by a running transaction
+  \/ \E c \in CLIENT :
+       /\ client_state[c] = "working"
+       /\ \E k \in KEY :
+            msg' = msg \union
+              {[type |-> "read", key |-> k, ts |-> client_ts[c].start_ts]}
+       /\ UNCHANGED <<next_ts, client_vars, key_vars>>
+  \* When all transactions are finished, we read all keys with latest TS
+  \/ /\ \A c \in CLIENT : client_state[c] \in {"committed", "aborted", "undetermined"}
+     /\ \E k \in KEY :
+            msg' = msg \union
+              {[type |-> "read", key |-> k, ts |-> next_ts]}
+     /\ UNCHANGED <<next_ts, client_vars, key_vars>>
 
 Init ==
     /\ next_ts = 1
@@ -356,7 +418,7 @@ NextTsTypeInv == next_ts \in Pos
 ClientStateTypeInv ==
   client_state \in [
     CLIENT -> {"init", "working", "prewriting",
-               "committing", "committed", "aborted"}
+               "committing", "committed", "aborted", "undetermined"}
   ]
 
 ClientTsTypeInv ==
@@ -422,9 +484,10 @@ WriteConsistency ==
          /\ rec.ts = rec.start_ts
 
 LockConsistency ==
-  \* There should be at most one lock for each key.
   \A k \in KEY :
+    \* There should be at most one lock for each key.
     /\ Cardinality(key_lock[k]) <= 1
+    \* When the lock exists, there cannot be a corresponding commit record
     /\ \A l \in key_lock[k] :
          ~ \E w \in key_write[k] : w.start_ts = l.ts
 
@@ -435,6 +498,7 @@ CommittedClientConsistency ==
       commit_ts == client_ts[c].commit_ts
       primary == client_key[c].primary
     IN
+      \* When the client considers it's committed, its primary key must be committed
       client_state[c] = "committed" =>
         \E w \in key_write[primary] :
           /\ w.start_ts = start_ts
@@ -458,6 +522,8 @@ CommittedTxnConsistency ==
         start_ts == client_ts[c].start_ts
       IN
         \A wp \in key_write[primary] :
+          \* If the primary key is committed, the secondary keys of the same transaction
+          \* must be either committed or locked
           wp.start_ts = start_ts /\ wp.type = "write" =>
             \A s \in secondary :
               \/ \E l \in key_lock[s] : l.ts = start_ts
@@ -484,6 +550,7 @@ THEOREM Safety ==
                         /\ WriteConsistency
                         /\ LockConsistency
                         /\ CommittedTxnConsistency
+                        /\ AbortedClientConsistency
                         /\ RollbackConsistency
                         /\ UniqueWrite)
 
