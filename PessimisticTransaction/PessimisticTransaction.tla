@@ -71,6 +71,15 @@ Range(m) == {m[i] : i \in DOMAIN m}
 findStaleLock(k, ts) ==
   {l \in key_lock[k] : l.pessimistic = FALSE /\ l.ts < ts}
   
+\* Get the write records of k before or at timestamp ts
+historyWrites(k, ts) ==
+  {w \in key_write[k] : w.ts <= ts}
+
+\* Get the set of the latest write record of k before or at timestamp ts
+latestHistoryWrite(k, ts) ==
+  {w \in historyWrites(k, ts) :
+    \A w2 \in historyWrites(k, ts) : w.ts >= w2.ts}
+  
 \* Rollback key k in the transaction starting at ts
 rollback(k, ts) ==
   \* If the existing lock has the same ts, unlock it.
@@ -79,9 +88,10 @@ rollback(k, ts) ==
      ELSE UNCHANGED key_lock
   /\ key_data' = [key_data EXCEPT ![k] = @ \ {[ts |-> ts]}]
   \* Write a rollback in the write column.
-  \* TODO: collapse rollback
   /\ key_write' = [key_write EXCEPT
-       ![k] = @ \union {[ts |-> ts, type |-> "rollback", start_ts |-> ts]}]
+       ![k] = (@ \ {w \in latestHistoryWrite(k, ts) : w.type = "rollback"}) \* collapse rollback
+                 \union {[ts |-> ts, type |-> "rollback", start_ts |-> ts]}]
+       
 
 \* Commit key k       
 commit(k, start_ts, commit_ts) ==
@@ -377,19 +387,10 @@ ServerOp ==
   \/ DoCommit
  
 Read ==
-  \* Read by a running transaction
-  \/ \E c \in CLIENT :
-       /\ client_state[c] = "working"
-       /\ \E k \in KEY :
-            msg' = msg \union
-              {[type |-> "read", key |-> k, ts |-> client_ts[c].start_ts]}
-       /\ UNCHANGED <<next_ts, client_vars, key_vars>>
-  \* When all transactions are finished, we read all keys with latest TS
-  \/ /\ \A c \in CLIENT : client_state[c] \in {"committed", "aborted", "undetermined"}
-     /\ \E k \in KEY :
-            msg' = msg \union
-              {[type |-> "read", key |-> k, ts |-> next_ts]}
-     /\ UNCHANGED <<next_ts, client_vars, key_vars>>
+  \E ts \in 0..next_ts :
+    \E k \in KEY :
+      /\ msg' = msg \union {[type |-> "read", key |-> k, ts |-> next_ts]}
+      /\ UNCHANGED <<next_ts, client_vars, key_vars>>
 
 Init ==
     /\ next_ts = 1
@@ -454,8 +455,7 @@ MsgTypeInv ==
     [c : CLIENT, type : {"commit"}, key : KEY, start_ts : Pos, commit_ts : Pos] \union
     [type : {"read"}, key : KEY, ts : Nat] \union
     [type : {"cleanup"}, primary : KEY, start_ts : Pos] \union
-    [type : {"resolve"}, primary : KEY, start_ts : Pos, commit_ts : Nat] \union
-    [type : {"rollback"}, key : SUBSET KEY, start_ts: Pos]
+    [type : {"resolve"}, primary : KEY, start_ts : Pos, commit_ts : Nat]
   )
 
 TypeInvariant ==
