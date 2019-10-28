@@ -109,7 +109,6 @@ rollback(k, ts) ==
   /\ key_write' = [key_write EXCEPT
        ![k] = (@ \ {w \in latestHistoryWrite(k, ts) : w.type = "rollback"}) \* collapse rollback
                  \union {[ts |-> ts, type |-> "rollback", start_ts |-> ts]}]
-       
 
 \* Commit key k       
 commit(k, start_ts, commit_ts) ==
@@ -135,6 +134,20 @@ undetermine(c) ==
   /\ client_state' = [client_state EXCEPT ![c] = "undetermined"]
   
 -----------------------------------------------------------------------------
+
+StartOptimistic(c) ==
+  /\ client_state[c] = "init"
+  /\ next_ts' = next_ts + 1
+  /\ client_key' =
+         [client_key EXCEPT
+           ![c] = [primary |-> CLIENT_PRIMARY[c],
+                   secondary |-> CLIENT_KEY[c] \ {CLIENT_PRIMARY[c]},
+                   pessimistic |-> {}, \* An optimistic transaction has no pessimistic lock to acquire
+                   pending |-> CLIENT_KEY[c]]]
+  /\ client_state' = [client_state EXCEPT ![c] = "prewriting"]
+  \* The for_update_ts is initialized to be 0 in optimistic transactions.
+  /\ client_ts' = [client_ts EXCEPT ![c].start_ts = next_ts', ![c].for_update_ts = 0]
+  /\ UNCHANGED <<key_vars, msg>>
 
 StartPessimistic(c) ==
   /\ client_state[c] = "init"
@@ -165,7 +178,7 @@ LockKey(c) ==
                start_ts |-> client_ts[c].start_ts, for_update_ts |-> client_ts[c].for_update_ts]}
          /\ UNCHANGED <<next_ts, client_vars, key_vars>>
        
-PessimisticPrewrite(c) ==
+Prewrite(c) ==
   /\ client_state[c] = "prewriting"
   /\ IF client_key[c].pending = {}
      THEN
@@ -195,11 +208,16 @@ Commit(c) ==
          start_ts |-> client_ts[c].start_ts, commit_ts |-> client_ts'[c].commit_ts]}
   /\ UNCHANGED <<client_state, client_key, key_vars>>
   
+OptimisticClientOp(c) ==
+  \/ StartOptimistic(c)
+  \/ Prewrite(c)
+  \/ Commit(c)
+  \* Committing secondary keys is ommitted
          
 PessimisticClientOp(c) ==
   \/ StartPessimistic(c)
   \/ LockKey(c)
-  \/ PessimisticPrewrite(c)
+  \/ Prewrite(c)
   \/ Commit(c)
   \* Committing secondary keys is ommitted
   
@@ -339,7 +357,39 @@ DoLockKey ==
               /\ l.pessimistic
               /\ l.for_update_ts < for_update_ts
               /\ writeLock
-      
+
+DoOptimisticPrewrite ==
+  \E cmd \in msg :
+   /\ cmd.type = "prewrite"
+   /\ cmd.for_update_ts = 0
+   /\ LET
+        c == cmd.c
+        k == cmd.key
+        primary == cmd.primary
+        ts == cmd.start_ts
+        lock == { l \in key_lock[k] : l.ts # ts }
+      IN
+        IF \E w \in key_write[k] : w.ts >= ts
+        THEN
+          /\ abortTxn(c)
+          /\ UNCHANGED <<client_ts, client_key, next_ts, key_vars, msg>>
+        ELSE IF lock # {}
+        THEN
+          \* When there is another transaction's lock, the client may resolve the lock by cleanup.
+          /\ msg' = msg \union
+               {[type |-> "cleanup", primary |-> l.primary, start_ts |-> l.ts] : l \in lock}
+          /\ UNCHANGED <<client_state, client_ts, client_key, key_vars, next_ts>>
+          \* Response loss leads to no state change
+        ELSE
+          \* Otherwise prewrite
+          /\ key_lock' = [key_lock EXCEPT ![k] = {[ts |-> ts, for_update_ts |-> 0, primary |-> primary, pessimistic |-> FALSE]}]
+          /\ key_data' = [key_data EXCEPT ![k] = @ \union {[ts |-> ts]}]
+          \* Inform the client that the key is successfully prewritten
+          /\ \/ client_key' = [client_key EXCEPT ![c].pending = @ \ {k}]
+             \* Simulate response loss
+             \/ UNCHANGED client_key
+          /\ UNCHANGED <<client_state, client_ts, key_write, key_last_read_ts, next_ts, msg>>
+
 DoPessimisticPrewrite ==
   \E cmd \in msg :
    /\ cmd.type = "prewrite"
@@ -400,6 +450,7 @@ ServerOp ==
   \/ DoCleanup
   \/ DoResolve
   \/ DoLockKey
+  \/ DoOptimisticPrewrite
   \/ DoPessimisticPrewrite
   \/ DoCommit
  
@@ -424,6 +475,7 @@ Init ==
 
 Next == 
   \/ ServerOp
+  \/ \E c \in OPTIMISTIC_CLIENT : OptimisticClientOp(c)
   \/ \E c \in PESSIMISTIC_CLIENT : PessimisticClientOp(c)
   \/ Read
   
@@ -468,7 +520,7 @@ KeyLastReadTsTypeInv ==
 MsgTypeInv ==
   msg \subseteq (
     [c : CLIENT, type : {"lock", "prewrite"}, key : KEY, primary: KEY,
-     start_ts : Pos, for_update_ts : Pos] \union
+     start_ts : Pos, for_update_ts : Nat] \union
     [c : CLIENT, type : {"commit"}, key : KEY, start_ts : Pos, commit_ts : Pos] \union
     [type : {"read"}, key : KEY, ts : Nat] \union
     [type : {"cleanup"}, primary : KEY, start_ts : Pos] \union
