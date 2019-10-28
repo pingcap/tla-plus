@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <launchConfiguration type="org.lamport.tla.toolbox.tool.tlc.modelCheck">
     <stringAttribute key="TLCCmdLineParameters" value=""/>
-    <intAttribute key="collectCoverage" value="0"/>
+    <intAttribute key="collectCoverage" value="1"/>
     <stringAttribute key="configurationName" value="Test1"/>
     <booleanAttribute key="deferLiveness" value="false"/>
     <intAttribute key="dfidDepth" value="100"/>
@@ -12,7 +12,7 @@
     <stringAttribute key="distributedTLC" value="off"/>
     <stringAttribute key="distributedTLCVMArgs" value=""/>
     <intAttribute key="fpBits" value="1"/>
-    <intAttribute key="fpIndex" value="84"/>
+    <intAttribute key="fpIndex" value="98"/>
     <booleanAttribute key="fpIndexRandom" value="true"/>
     <intAttribute key="maxHeapSize" value="75"/>
     <intAttribute key="maxSetSize" value="1000000"/>
@@ -39,6 +39,10 @@
     <listAttribute key="modelParameterConstants">
         <listEntry value="KEY;;{k1, k2};1;1"/>
         <listEntry value="CLIENT;;{c1, c2};1;1"/>
+        <listEntry value="PESSIMISTIC_CLIENT;;{c1, c2};0;0"/>
+        <listEntry value="OPTIMISTIC_CLIENT;;{};0;0"/>
+        <listEntry value="CLIENT_KEY;;c1 :&gt; {k1, k2} @@ c2 :&gt; {k1};0;0"/>
+        <listEntry value="CLIENT_PRIMARY;;c1 :&gt; k2 @@ c2 :&gt; k1;0;0"/>
     </listAttribute>
     <intAttribute key="numberOfWorkers" value="12"/>
     <booleanAttribute key="recover" value="false"/>

@@ -9,6 +9,26 @@ ASSUME KEY # {} \* Keys cannot be empty.
 \* The set of clients to execute a transaction.
 CONSTANTS CLIENT
 
+\* CLIENT_KEY is a set of [c -> SUBSET KEY],
+\* representing involved keys of each client
+CONSTANTS CLIENT_KEY
+
+ASSUME \A c \in CLIENT: CLIENT_KEY[c] \subseteq CLIENT_KEY[c]
+
+CONSTANTS CLIENT_PRIMARY
+
+ASSUME \A c \in CLIENT: CLIENT_PRIMARY[c] \in CLIENT_KEY[c]
+
+\* The set of pessimistic clients
+CONSTANTS PESSIMISTIC_CLIENT
+
+ASSUME PESSIMISTIC_CLIENT \subseteq CLIENT
+
+\* The set of optimistic clients
+CONSTANTS OPTIMISTIC_CLIENT
+
+ASSUME OPTIMISTIC_CLIENT \subseteq CLIENT
+
 \* next_ts is the timestamp for transaction. It is increased monotonically,
 \* so every transaction must have a unique start and commit ts.
 VARIABLES next_ts
@@ -63,8 +83,6 @@ vars == <<next_ts, client_vars, key_vars, msg>>
 
 Pos == {x \in Nat : x > 0}
 
-Range(m) == {m[i] : i \in DOMAIN m}
-
 -----------------------------------------------------------------------------
 
 \* Find a stale lock which blocks the read for key k.
@@ -118,17 +136,15 @@ undetermine(c) ==
   
 -----------------------------------------------------------------------------
 
-Start(c) ==
+StartPessimistic(c) ==
   /\ client_state[c] = "init"
   /\ next_ts' = next_ts + 1
-  \* Select any key as the primary key
-  /\ \E primary \in KEY :
-       client_key' =
+  /\ client_key' =
          [client_key EXCEPT
-           ![c] = [primary |-> primary,
-                   secondary |-> KEY \ {primary},
-                   pessimistic |-> KEY, \* Assume we need to acquire pessimistic locks for all keys
-                   pending |-> KEY]]
+           ![c] = [primary |-> CLIENT_PRIMARY[c],
+                   secondary |-> CLIENT_KEY[c] \ {CLIENT_PRIMARY[c]},
+                   pessimistic |-> CLIENT_KEY[c], \* Assume we need to acquire pessimistic locks for all keys
+                   pending |-> CLIENT_KEY[c]]]
   /\ client_state' = [client_state EXCEPT ![c] = "working"]
   \* The for_update_ts is initialized to be the same as start_ts.
   /\ client_ts' = [client_ts EXCEPT ![c].start_ts = next_ts', ![c].for_update_ts = next_ts']
@@ -149,7 +165,7 @@ LockKey(c) ==
                start_ts |-> client_ts[c].start_ts, for_update_ts |-> client_ts[c].for_update_ts]}
          /\ UNCHANGED <<next_ts, client_vars, key_vars>>
        
-Prewrite(c) ==
+PessimisticPrewrite(c) ==
   /\ client_state[c] = "prewriting"
   /\ IF client_key[c].pending = {}
      THEN
@@ -180,10 +196,10 @@ Commit(c) ==
   /\ UNCHANGED <<client_state, client_key, key_vars>>
   
          
-ClientOp(c) ==
-  \/ Start(c)
+PessimisticClientOp(c) ==
+  \/ StartPessimistic(c)
   \/ LockKey(c)
-  \/ Prewrite(c)
+  \/ PessimisticPrewrite(c)
   \/ Commit(c)
   \* Committing secondary keys is ommitted
   
@@ -260,7 +276,7 @@ DoResolve ==
              /\ commit(k, cmd.start_ts, cmd.commit_ts)
     /\ UNCHANGED <<next_ts, client_vars, key_last_read_ts, msg>>    
           
-\* TODO: This action is too complex and concrete. Try to simplify it.
+\* This action is too complex and concrete. Maybe simplify it?
 DoLockKey ==
   \E cmd \in msg :
    /\ cmd.type = "lock"
@@ -324,9 +340,10 @@ DoLockKey ==
               /\ l.for_update_ts < for_update_ts
               /\ writeLock
       
-DoPrewrite ==
+DoPessimisticPrewrite ==
   \E cmd \in msg :
    /\ cmd.type = "prewrite"
+   /\ cmd.for_update_ts > 0
    /\ LET
         c == cmd.c
         k == cmd.key
@@ -383,7 +400,7 @@ ServerOp ==
   \/ DoCleanup
   \/ DoResolve
   \/ DoLockKey
-  \/ DoPrewrite
+  \/ DoPessimisticPrewrite
   \/ DoCommit
  
 Read ==
@@ -407,7 +424,7 @@ Init ==
 
 Next == 
   \/ ServerOp
-  \/ \E c \in CLIENT : ClientOp(c)
+  \/ \E c \in PESSIMISTIC_CLIENT : PessimisticClientOp(c)
   \/ Read
   
 PessimisticSpec == Init /\ [][Next]_vars
