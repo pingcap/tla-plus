@@ -19,7 +19,7 @@ CLIENT == PESSIMISTIC_CLIENT \union OPTIMISTIC_CLIENT
 \* representing involved keys of each client
 CONSTANTS CLIENT_KEY
 
-ASSUME \A c \in CLIENT: CLIENT_KEY[c] \subseteq CLIENT_KEY[c]
+ASSUME \A c \in CLIENT: CLIENT_KEY[c] \subseteq KEY
 
 CONSTANTS CLIENT_PRIMARY
 
@@ -53,7 +53,7 @@ VARIABLES key_data
 VARIABLES key_lock
 
 \* key_write[k] is a sequence of committed version of the key.
-\* A committed version of the key is a record of [ts, type, start_ts].
+\* A committed version of the key is a record of [ts, type, start_ts, protected].
 \* type can be "write" or "rollback" depending on record type. start_ts
 \* field only exists if type is "write". For "write" record, ts denotes
 \* commit_ts; for "rollback" record, $ts$ denotes start_ts.
@@ -96,15 +96,19 @@ latestHistoryWrite(k, ts) ==
   
 \* Rollback key k in the transaction starting at ts
 rollback(k, ts) ==
-  \* If the existing lock has the same ts, unlock it.
-  /\ IF \E l \in key_lock[k] : l.ts = ts
-     THEN key_lock' = [key_lock EXCEPT ![k] = {}]
-     ELSE UNCHANGED key_lock
-  /\ key_data' = [key_data EXCEPT ![k] = @ \ {[ts |-> ts]}]
-  \* Write a rollback in the write column.
-  /\ key_write' = [key_write EXCEPT
-       ![k] = (@ \ {w \in latestHistoryWrite(k, ts) : w.type = "rollback"}) \* collapse rollback
-                 \union {[ts |-> ts, type |-> "rollback", start_ts |-> ts]}]
+  LET
+    \* rollback the primary key of a pessimistic transaction needs be protected from being collapsed
+    protected == \E l \in key_lock[k] : l.for_update_ts > 0 /\ k = l.primary
+  IN
+    \* If the existing lock has the same ts, unlock it.
+    /\ IF \E l \in key_lock[k] : l.ts = ts
+       THEN key_lock' = [key_lock EXCEPT ![k] = {}]
+       ELSE UNCHANGED key_lock
+    /\ key_data' = [key_data EXCEPT ![k] = @ \ {[ts |-> ts]}]
+    \* Write a rollback in the write column.
+    /\ key_write' = [key_write EXCEPT
+         ![k] = (@ \ {w \in latestHistoryWrite(k, ts) : w.type = "rollback" /\ ~w.protected }) \* collapse rollback
+                   \union {[ts |-> ts, type |-> "rollback", start_ts |-> ts, protected |-> protected]}]
 
 \* Commit key k       
 commit(k, start_ts, commit_ts) ==
@@ -506,9 +510,8 @@ KeyLockTypeInv ==
   key_lock \in [KEY -> SUBSET [ts : Pos, for_update_ts : Nat, primary : KEY, pessimistic : BOOLEAN]]
 
 KeyWriteTypeInv ==
-  key_write \in [KEY ->
-    SUBSET [ts : Pos, type : {"write", "rollback"}, start_ts : Pos]
-  ]
+  key_write \in [KEY -> SUBSET [ts : Pos, type : {"write"}, start_ts : Pos]] \union
+      [KEY -> SUBSET [ts : Pos, type : {"rollback"}, start_ts : Pos, protected : BOOLEAN]]
 
 KeyLastReadTsTypeInv ==
   key_last_read_ts \in [KEY -> Nat]

@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <launchConfiguration type="org.lamport.tla.toolbox.tool.tlc.modelCheck">
-    <stringAttribute key="configurationName" value="Test1"/>
+    <stringAttribute key="configurationName" value="Test2"/>
     <intAttribute key="distributedFPSetCount" value="0"/>
     <stringAttribute key="distributedNetworkInterface" value="192.168.220.40"/>
     <intAttribute key="distributedNodesCount" value="1"/>
     <stringAttribute key="distributedTLC" value="off"/>
-    <intAttribute key="fpIndex" value="68"/>
+    <intAttribute key="fpIndex" value="27"/>
     <intAttribute key="maxHeapSize" value="25"/>
     <stringAttribute key="modelBehaviorInit" value="Init"/>
     <stringAttribute key="modelBehaviorNext" value="Next"/>
@@ -19,10 +19,10 @@
     <stringAttribute key="modelExpressionEval" value=""/>
     <listAttribute key="modelParameterConstants">
         <listEntry value="KEY;;{k1, k2};1;1"/>
-        <listEntry value="CLIENT_KEY;;c1 :&gt; {k1, k2} @@ c2 :&gt; {k2};0;0"/>
-        <listEntry value="PESSIMISTIC_CLIENT;;{c1, c2};1;0"/>
-        <listEntry value="OPTIMISTIC_CLIENT;;{};0;0"/>
-        <listEntry value="CLIENT_PRIMARY;;c1 :&gt; k1 @@ c2 :&gt; k2;0;0"/>
+        <listEntry value="CLIENT_KEY;;c1 :&gt; {k1, k2} @@ c2 :&gt; {k1} @@ c3 :&gt; {k2};0;0"/>
+        <listEntry value="PESSIMISTIC_CLIENT;;{c1};1;1"/>
+        <listEntry value="OPTIMISTIC_CLIENT;;{c2, c3};1;1"/>
+        <listEntry value="CLIENT_PRIMARY;;c1 :&gt; k1 @@ c2 :&gt; k1 @@ c3 :&gt; k2;0;0"/>
     </listAttribute>
     <intAttribute key="numberOfWorkers" value="6"/>
     <stringAttribute key="result.mail.address" value=""/>
