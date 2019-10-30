@@ -6,8 +6,14 @@ EXTENDS Integers, FiniteSets, TLC
 CONSTANTS KEY
 ASSUME KEY # {} \* Keys cannot be empty.
 
+\* The set of pessimistic clients
+CONSTANTS PESSIMISTIC_CLIENT
+
+\* The set of optimistic clients
+CONSTANTS OPTIMISTIC_CLIENT
+
 \* The set of clients to execute a transaction.
-CONSTANTS CLIENT
+CLIENT == PESSIMISTIC_CLIENT \union OPTIMISTIC_CLIENT
 
 \* CLIENT_KEY is a set of [c -> SUBSET KEY],
 \* representing involved keys of each client
@@ -18,16 +24,6 @@ ASSUME \A c \in CLIENT: CLIENT_KEY[c] \subseteq CLIENT_KEY[c]
 CONSTANTS CLIENT_PRIMARY
 
 ASSUME \A c \in CLIENT: CLIENT_PRIMARY[c] \in CLIENT_KEY[c]
-
-\* The set of pessimistic clients
-CONSTANTS PESSIMISTIC_CLIENT
-
-ASSUME PESSIMISTIC_CLIENT \subseteq CLIENT
-
-\* The set of optimistic clients
-CONSTANTS OPTIMISTIC_CLIENT
-
-ASSUME OPTIMISTIC_CLIENT \subseteq CLIENT
 
 \* next_ts is the timestamp for transaction. It is increased monotonically,
 \* so every transaction must have a unique start and commit ts.
@@ -478,7 +474,7 @@ Next ==
   \/ \E c \in OPTIMISTIC_CLIENT : OptimisticClientOp(c)
   \/ \E c \in PESSIMISTIC_CLIENT : PessimisticClientOp(c)
   \/ Read
-  
+    
 PessimisticSpec == Init /\ [][Next]_vars
 
 -----------------------------------------------------------------------------
