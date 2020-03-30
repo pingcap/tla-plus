@@ -1,5 +1,5 @@
 states/
-
+*.out
 **/*.toolbox/*/
 **/*.toolbox/*___*_SnapShot_*.launch
 **/*.toolbox/.project

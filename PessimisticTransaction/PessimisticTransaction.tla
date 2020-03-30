@@ -4,7 +4,7 @@ EXTENDS Integers, FiniteSets, TLC
 
 \* The set of transaction keys.
 CONSTANTS KEY
-ASSUME KEY # {} \* Keys cannot be empty.
+ASSUME KEY /= {} \* Keys cannot be empty.
 
 \* The set of pessimistic clients
 CONSTANTS PESSIMISTIC_CLIENT
@@ -77,7 +77,7 @@ vars == <<next_ts, client_vars, key_vars, msg>>
 
 -----------------------------------------------------------------------------
 
-Pos == {x \in Nat : x > 0}
+Pos == Nat \ {0}
 
 -----------------------------------------------------------------------------
 
@@ -99,6 +99,7 @@ rollback(k, ts) ==
   LET
     \* rollback the primary key of a pessimistic transaction needs be protected from being collapsed
     protected == \E l \in key_lock[k] : l.for_update_ts > 0 /\ k = l.primary
+    latest_write == latestHistoryWrite(k, ts)
   IN
     \* If the existing lock has the same ts, unlock it.
     /\ IF \E l \in key_lock[k] : l.ts = ts
@@ -107,8 +108,11 @@ rollback(k, ts) ==
     /\ key_data' = [key_data EXCEPT ![k] = @ \ {[ts |-> ts]}]
     \* Write a rollback in the write column.
     /\ key_write' = [key_write EXCEPT
-         ![k] = (@ \ {w \in latestHistoryWrite(k, ts) : w.type = "rollback" /\ ~w.protected }) \* collapse rollback
-                   \union {[ts |-> ts, type |-> "rollback", start_ts |-> ts, protected |-> protected]}]
+          ![k] = IF ~ \E w \in latest_write: w.ts = ts
+                 THEN (@ \ {w \in latest_write: w.type = "rollback" /\ ~w.protected }) \* collapse rollback
+                         \union {[ts |-> ts, type |-> "rollback", start_ts |-> ts, protected |-> protected]}
+                 ELSE @
+       ]
 
 \* Commit key k       
 commit(k, start_ts, commit_ts) ==
@@ -118,6 +122,7 @@ commit(k, start_ts, commit_ts) ==
        /\ key_lock' = [key_lock EXCEPT ![k] = {}]
        /\ key_write' = [key_write EXCEPT ![k] = @ \union {[ts |-> commit_ts, type |-> "write", start_ts |-> start_ts]}]
        \* Assert we don't violate snapshot isolation
+       \* TODO
        /\ Assert(key_last_read_ts[k] < commit_ts, <<key_last_read_ts[k], commit_ts>>)
      ELSE
        UNCHANGED <<key_lock, key_write>>
@@ -125,14 +130,9 @@ commit(k, start_ts, commit_ts) ==
 
 \* Change the state of client c to aborted
 abortTxn(c) ==
-  /\ ~ client_state[c] \in {"committed", "undetermined"}
+  /\ client_state[c] /= "committed"
   /\ client_state' = [client_state EXCEPT ![c] = "aborted"]
 
-\* Change the state of client c to undetermined due to lost commit RPC.
-undetermine(c) ==
-  /\ client_state[c] = "committing"
-  /\ client_state' = [client_state EXCEPT ![c] = "undetermined"]
-  
 -----------------------------------------------------------------------------
 
 StartOptimistic(c) ==
@@ -258,7 +258,7 @@ DoCleanup ==
           lock == {l \in key_lock[k] : l.ts = ts}
           committed == {w \in key_write[k] : w.start_ts = ts /\ w.type = "write"}
         IN
-          IF committed # {}
+          IF committed /= {}
           \* The transaction is already committed, so resolve locks using its commit_ts
           THEN
             /\ msg' = msg \union
@@ -345,7 +345,7 @@ DoLockKey ==
           LET
             l == CHOOSE l \in key_lock[k] : TRUE
           IN
-            IF l.ts # ts
+            IF l.ts /= ts
             \* If there is a lock from another transaction, the client may cleanup the lock.
             \* Response loss causes no state change.
             THEN                        
@@ -367,13 +367,13 @@ DoOptimisticPrewrite ==
         k == cmd.key
         primary == cmd.primary
         ts == cmd.start_ts
-        lock == { l \in key_lock[k] : l.ts # ts }
+        lock == { l \in key_lock[k] : l.ts /= ts }
       IN
         IF \E w \in key_write[k] : w.ts >= ts
         THEN
           /\ abortTxn(c)
           /\ UNCHANGED <<client_ts, client_key, next_ts, key_vars, msg>>
-        ELSE IF lock # {}
+        ELSE IF lock /= {}
         THEN
           \* When there is another transaction's lock, the client may resolve the lock by cleanup.
           /\ msg' = msg \union
@@ -403,7 +403,7 @@ DoPessimisticPrewrite ==
       IN
         IF
           \/ key_lock[k] = {}
-          \/ \E l \in key_lock[k] : l.ts # ts
+          \/ \E l \in key_lock[k] : l.ts /= ts
         THEN
           \* Abort the transaction when its lock doesn't exist
           /\ abortTxn(c)
@@ -433,16 +433,12 @@ DoCommit ==
         THEN
           /\ commit(k, start_ts, commit_ts)
           \* Change client state to committed.
-          /\ \/ client_state' = [client_state EXCEPT ![c] = "committed"]
-             \* Commit response is lost
-             \/ undetermine(c)
+          /\ client_state' = [client_state EXCEPT ![c] = "committed"]
           /\ UNCHANGED <<client_ts, client_key, next_ts, key_last_read_ts, msg>>
         ELSE
           \* The lock doesn't exist and the key is not committed, so commit fails.
-          /\ \/ /\ Assert(client_state[c] # "committed", client_state[c])
-                /\ abortTxn(c)
-             \* Commit response is lost
-             \/ undetermine(c)
+          /\ Assert(client_state[c] /= "committed", client_state[c])
+          /\ abortTxn(c)
           /\ UNCHANGED <<client_ts, client_key, next_ts, key_vars, msg>>
 
 ServerOp ==
@@ -483,19 +479,19 @@ PessimisticSpec == Init /\ [][Next]_vars
 
 -----------------------------------------------------------------------------
 
-NextTsTypeInv == next_ts \in Pos
+NextTsTypeOK == next_ts \in Pos
 
-ClientStateTypeInv ==
+ClientStateTypeOK ==
   client_state \in [
     CLIENT -> {"init", "working", "prewriting",
-               "committing", "committed", "aborted", "undetermined"}
+               "committing", "committed", "aborted"}
   ]
 
-ClientTsTypeInv ==
+ClientTsTypeOK ==
   client_ts \in
   [CLIENT -> [start_ts : Nat, for_update_ts : Nat, commit_ts : Nat]]
 
-ClientKeyTypeInv ==
+ClientKeyTypeOK ==
   \A c \in CLIENT :
     \/ client_state[c] = "init"
     \/ client_key[c] \in [primary : KEY,
@@ -503,20 +499,20 @@ ClientKeyTypeInv ==
                           pessimistic : SUBSET KEY,
                           pending : SUBSET KEY]
 
-KeyDataTypeInv ==
+KeyDataTypeOK ==
   key_data \in [KEY -> SUBSET [ts : Pos]]
 
-KeyLockTypeInv ==
+KeyLockTypeOK ==
   key_lock \in [KEY -> SUBSET [ts : Pos, for_update_ts : Nat, primary : KEY, pessimistic : BOOLEAN]]
 
-KeyWriteTypeInv ==
-  key_write \in [KEY -> SUBSET [ts : Pos, type : {"write"}, start_ts : Pos]] \union
-      [KEY -> SUBSET [ts : Pos, type : {"rollback"}, start_ts : Pos, protected : BOOLEAN]]
+KeyWriteTypeOK ==
+  key_write \in [KEY -> SUBSET ([ts : Pos, type : {"write"}, start_ts : Pos] \union 
+                                [ts : Pos, type : {"rollback"}, start_ts : Pos, protected : BOOLEAN])] 
 
-KeyLastReadTsTypeInv ==
+KeyLastReadTsTypeOK ==
   key_last_read_ts \in [KEY -> Nat]
 
-MsgTypeInv ==
+MsgTypeOK ==
   msg \subseteq (
     [c : CLIENT, type : {"lock", "prewrite"}, key : KEY, primary: KEY,
      start_ts : Pos, for_update_ts : Nat] \union
@@ -526,16 +522,16 @@ MsgTypeInv ==
     [type : {"resolve"}, primary : KEY, start_ts : Pos, commit_ts : Nat]
   )
 
-TypeInvariant ==
-  /\ NextTsTypeInv
-  /\ ClientStateTypeInv
-  /\ ClientTsTypeInv
-  /\ ClientKeyTypeInv
-  /\ KeyDataTypeInv
-  /\ KeyLockTypeInv
-  /\ KeyWriteTypeInv
-  /\ KeyLastReadTsTypeInv
-  /\ MsgTypeInv
+TypeOK ==
+  /\ NextTsTypeOK
+  /\ ClientStateTypeOK
+  /\ ClientTsTypeOK
+  /\ ClientKeyTypeOK
+  /\ KeyDataTypeOK
+  /\ KeyLockTypeOK
+  /\ KeyWriteTypeOK
+  /\ KeyLastReadTsTypeOK
+  /\ MsgTypeOK
   
 -----------------------------------------------------------------------------
 
@@ -583,7 +579,7 @@ AbortedClientConsistency ==
 
 CommittedTxnConsistency ==
   \A c \in CLIENT :
-    client_state[c] # "init" =>
+    client_state[c] /= "init" =>
       LET
         primary == client_key[c].primary
         secondary == client_key[c].secondary
@@ -614,7 +610,7 @@ UniqueWrite ==
 -----------------------------------------------------------------------------
 
 THEOREM Safety ==
-  PessimisticSpec => [](/\ TypeInvariant
+  PessimisticSpec => [](/\ TypeOK
                         /\ WriteConsistency
                         /\ LockConsistency
                         /\ CommittedTxnConsistency
