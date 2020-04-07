@@ -566,14 +566,14 @@ MsgTsConsistency ==
           req.commit_ts <= next_ts
   /\ \A resp \in resp_msgs : resp.start_ts <= next_ts
 
-\* SnapshotIsolation is implied from the four assumptions (but is not
+\* SnapshotIsolation is implied from the following assumptions (but is not
 \* nessesary), because SnapshotIsolation means that: 
 \*  (1) Once a transcation is committed, all keys of the transaction should
 \*      be always readable or have lock on secondary keys(eventually readable).
 \*    PROOF BY CommitConsistency, MsgConsistency
 \*  (2) For a given transaction, all transaction that commits after that 
 \*      transaction should have greater commit_ts than the next_ts at the
-\*      time that the given transaction commits.  So as to be able to
+\*      time that the given transaction commits, so as to be able to
 \*      distinguish the transactions that commits before and after
 \*      from all transactions that preserved by (1).
 \*    PROOF BY NextTsConsistency, MsgTsConsistency
@@ -583,6 +583,7 @@ SnapshotIsolation == /\ CommitConsistency
                      /\ AbortConsistency
                      /\ NextTsMonotonicity
                      /\ MsgMonotonicity
+                     /\ MsgTsConsistency
 -----------------------------------------------------------------------------
 THEOREM Safety ==
   Spec => [](/\ TypeOK
