@@ -229,30 +229,32 @@ commit(pk, start_ts, commit_ts) ==
                                                          type |-> "write",
                                                          start_ts |-> start_ts]}]
 
-\* Rollback the transaction that starts at start_ts on key k.
+\* Clean the locks belong to start_ts on key k.
 rollback(k, start_ts) ==
+  /\ IF \E l \in key_lock[k] : l.ts = start_ts
+     THEN key_lock' = [key_lock EXCEPT ![k] = {}]
+     ELSE UNCHANGED key_lock
+  /\ key_data' = [key_data EXCEPT ![k] = @ \ {start_ts}]
+
+\* Rollback the transaction that starts at start_ts on primary key pk.
+rollback_primary(pk, start_ts) ==
   LET
     \* Rollback record on the primary key of a pessimistic transaction
     \* needs to be protected from being collapsed.  If we can't decide
     \* whether it suffices that because the lock is missing or mismatched,
     \* it should also be protected.
-    protected == \/ \E l \in key_lock[k] :
+    protected == \/ \E l \in key_lock[pk] :
                       /\ l.ts = start_ts
-                      /\ l.primary = k 
                       /\ l.type \in {"lock_key", "prewrite_pessimistic"} 
-                 \/ \E l \in key_lock[k] : l.ts /= start_ts
-                 \/ key_lock[k] = {}
+                 \/ \E l \in key_lock[pk] : l.ts /= start_ts
+                 \/ key_lock[pk] = {}
   IN
-    \* If a lock exists and has the same ts, unlock it.
-    /\ IF \E l \in key_lock[k] : l.ts = start_ts
-       THEN key_lock' = [key_lock EXCEPT ![k] = {}]
-       ELSE UNCHANGED key_lock
-    /\ key_data' = [key_data EXCEPT ![k] = @ \ {start_ts}]
+    /\ rollback(pk, start_ts)
     /\ IF 
-          /\ ~ \E w \in key_write[k]: w.ts = start_ts
+          /\ ~ \E w \in key_write[pk]: w.ts = start_ts
        THEN
             key_write' = [key_write EXCEPT
-              ![k] = 
+              ![pk] = 
                 \* collapse rollback
                 (@ \ {w \in @ : w.type = "rollback" /\ ~w.protected /\ w.ts < start_ts})
                 \* write rollback record
@@ -408,7 +410,7 @@ ServerCleanup ==
                           commit_ts |-> w.ts] : w \in committed})
             /\ UNCHANGED <<resp_msgs, client_vars, key_vars, next_ts>>
           ELSE
-            /\ rollback(pk, start_ts)
+            /\ rollback_primary(pk, start_ts)
             /\ SendReqs({[type |-> "resolve_rollbacked",
                           start_ts |-> start_ts,
                           primary |-> pk]})
@@ -438,7 +440,7 @@ ServerResolveRollbacked ==
             /\ l.primary = req.primary
             /\ l.ts = start_ts
             /\ rollback(k, start_ts)
-            /\ UNCHANGED <<msg_vars, client_vars, next_ts>>
+            /\ UNCHANGED <<msg_vars, client_vars, key_write, next_ts>>
 -----------------------------------------------------------------------------
 \* Specification
 
