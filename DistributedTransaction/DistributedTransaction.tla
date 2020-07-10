@@ -229,7 +229,7 @@ commit(pk, start_ts, commit_ts) ==
                                                          type |-> "write",
                                                          start_ts |-> start_ts]}]
 
-\* Clean the locks belong to start_ts on key k.
+\* Clean the locks belonging to start_ts on key k.
 rollback(k, start_ts) ==
   /\ IF \E l \in key_lock[k] : l.ts = start_ts
      THEN key_lock' = [key_lock EXCEPT ![k] = {}]
