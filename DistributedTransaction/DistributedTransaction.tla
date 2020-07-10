@@ -36,7 +36,7 @@ VARIABLES req_msgs
 VARIABLES resp_msgs
 
 \* key_data[k] is the set of multi-version data of the key.  Since we
-\* don't care about the concrete value of data, a strat_ts is sufficient
+\* don't care about the concrete value of data, a start_ts is sufficient
 \* to represent one data version.
 VARIABLES key_data
 \* key_lock[k] is the set of lock (zero or one element).  A lock is of a
@@ -266,7 +266,7 @@ rollback(k, start_ts) ==
 ServerLockKey ==
   \E req \in req_msgs :
     /\ req.type = "lock_key"
-    /\ LET 
+    /\ LET
         k == req.key
         start_ts == req.start_ts
        IN
@@ -311,7 +311,7 @@ ServerLockKey ==
 ServerPrewritePessimistic ==
   \E req \in req_msgs :
     /\ req.type = "prewrite_pessimistic"
-    /\ LET 
+    /\ LET
         k == req.key
         start_ts == req.start_ts
        IN
@@ -332,7 +332,7 @@ ServerPrewritePessimistic ==
 ServerPrewriteOptimistic ==
   \E req \in req_msgs :
     /\ req.type = "prewrite_optimistic"
-    /\ LET 
+    /\ LET
         k == req.key
         start_ts == req.start_ts
        IN
@@ -355,7 +355,7 @@ ServerPrewriteOptimistic ==
 ServerCommit ==
   \E req \in req_msgs :
     /\ req.type = "commit"
-    /\ LET 
+    /\ LET
         pk == req.primary
         start_ts == req.start_ts
        IN
@@ -395,7 +395,7 @@ ServerCleanupStaleLock ==
 ServerCleanup ==
   \E req \in req_msgs :
     /\ req.type = "cleanup"
-    /\ LET 
+    /\ LET
           pk == req.primary
           start_ts == req.start_ts
           committed == {w \in key_write[pk] : w.start_ts = start_ts /\ w.type = "write"}
@@ -417,7 +417,7 @@ ServerCleanup ==
 ServerResolveCommitted ==
   \E req \in req_msgs :
     /\ req.type = "resolve_committed"
-    /\ LET 
+    /\ LET
         start_ts == req.start_ts
        IN
         \E k \in KEY:
@@ -430,7 +430,7 @@ ServerResolveCommitted ==
 ServerResolveRollbacked ==
   \E req \in req_msgs :
     /\ req.type = "resolve_rollbacked"
-    /\ LET 
+    /\ LET
         start_ts == req.start_ts
        IN
         \E k \in KEY:
@@ -570,7 +570,7 @@ MsgTsConsistency ==
 \* nessesary), because SnapshotIsolation means that: 
 \*  (1) Once a transcation is committed, all keys of the transaction should
 \*      be always readable or have lock on secondary keys(eventually readable).
-\*    PROOF BY CommitConsistency, MsgConsistency
+\*    PROOF BY CommitConsistency, MsgMonotonicity
 \*  (2) For a given transaction, all transaction that commits after that 
 \*      transaction should have greater commit_ts than the next_ts at the
 \*      time that the given transaction commits, so as to be able to
@@ -578,7 +578,7 @@ MsgTsConsistency ==
 \*      from all transactions that preserved by (1).
 \*    PROOF BY NextTsConsistency, MsgTsConsistency
 \*  (3) All aborted transactions would be always not readable.
-\*    PROOF BY AbortConsistency, MsgConsistency
+\*    PROOF BY AbortConsistency, MsgMonotonicity
 SnapshotIsolation == /\ CommitConsistency
                      /\ AbortConsistency
                      /\ NextTsMonotonicity
