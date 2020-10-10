@@ -547,16 +547,12 @@ UniqueWrite ==
 \* Snapshot Isolation
 
 \* Asserts that next_ts is monotonically increasing.
-NextTsMonotonicity == 
-  \A ts \in Ts :
-    (ts <= next_ts) => [](ts <= next_ts)
+NextTsMonotonicity == [][next_ts' >= next_ts]_vars
 
 \* Asserts that no msg would be deleted once sent.
 MsgMonotonicity ==
-  /\ \A req \in ReqMessages :
-      req \in req_msgs => [](req \in req_msgs)
-  /\ \A resp \in RespMessages :
-      resp \in resp_msgs => [](resp \in resp_msgs)
+  /\ [][\A req \in req_msgs : req \in req_msgs']_vars
+  /\ [][\A resp \in resp_msgs : resp \in resp_msgs']_vars
 
 \* Asserts that all messages sent should have ts less than next_ts.
 MsgTsConsistency ==
