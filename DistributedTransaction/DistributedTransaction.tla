@@ -1,10 +1,10 @@
 ----------------------- MODULE DistributedTransaction -----------------------
-EXTENDS Integers
+EXTENDS Integers, FiniteSets
 
 \* The set of all keys.
 CONSTANTS KEY
 
-\* The sets of optiimistic clients and pessimistic clients.
+\* The sets of optimistic clients and pessimistic clients.
 CONSTANTS OPTIMISTIC_CLIENT, PESSIMISTIC_CLIENT
 CLIENT == PESSIMISTIC_CLIENT \union OPTIMISTIC_CLIENT
 
@@ -61,7 +61,7 @@ VARIABLES key_data
 \* (3) LockType = "PESSIMISTIC" <=> type = "lock_key"
 VARIABLES key_lock
 \* key_write[k] is a sequence of commit or rollback record of the key.
-\* It's a record of [ts, start_ts, type, [protected]].  type can be eihter
+\* It's a record of [ts, start_ts, type, [protected]].  type can be either
 \* "write" or "rollback".  ts represents the commit_ts of "write" record.
 \* Otherwise, ts equals to start_ts on "rollback" record.  "rollback"
 \* record has an additional protected field.  protected signifies the
@@ -79,7 +79,7 @@ VARIABLES client_ts
 \* for prewrite.
 VARIABLES client_key
 
-\* next_ts is a globally monotonically increasing integer, respresenting
+\* next_ts is a globally monotonically increasing integer, representing
 \* the virtual clock of transactions.  In practice, the variable is
 \* maintained by PD, the time oracle of a cluster.
 VARIABLES next_ts
@@ -120,10 +120,8 @@ TypeOK == /\ req_msgs \in SUBSET ReqMessages
                                           type : {"prewrite_optimistic",
                                                   "prewrite_pessimistic",
                                                   "lock_key"}]]
-          /\ \A k \in KEY :
-              \* At most one lock in key_lock[k]
-              \A l, l2 \in key_lock[k] :
-                l = l2
+          \* At most one lock in key_lock[k]
+          /\ \A k \in KEY: Cardinality(key_lock[k]) <= 1
           /\ key_write \in [KEY -> SUBSET (
                       [ts : Ts, start_ts : Ts, type : {"write"}]
               \union  [ts : Ts, start_ts : Ts, type : {"rollback"}, protected : BOOLEAN])]
@@ -184,7 +182,7 @@ ClientPrewritePessimistic(c) ==
                 key |-> k] : k \in CLIENT_KEY[c]})
   /\ UNCHANGED <<resp_msgs, key_vars, client_ts, next_ts>>
 
-ClientPrewriteOptimisistic(c) ==
+ClientPrewriteOptimistic(c) ==
   /\ client_state[c] = "init"
   /\ client_state' = [client_state EXCEPT ![c] = "prewriting"]
   /\ client_ts' = [client_ts EXCEPT ![c].start_ts = next_ts]
@@ -457,7 +455,7 @@ Init ==
 
 Next ==
   \/ \E c \in OPTIMISTIC_CLIENT :
-        \/ ClientPrewriteOptimisistic(c)
+        \/ ClientPrewriteOptimistic(c)
         \/ ClientPrewrited(c)
         \/ ClientCommit(c)
   \/ \E c \in PESSIMISTIC_CLIENT :
@@ -563,14 +561,14 @@ MsgTsConsistency ==
   /\ \A resp \in resp_msgs : resp.start_ts <= next_ts
 
 \* SnapshotIsolation is implied from the following assumptions (but is not
-\* nessesary), because SnapshotIsolation means that: 
-\*  (1) Once a transcation is committed, all keys of the transaction should
-\*      be always readable or have lock on secondary keys(eventually readable).
+\* necessary) because SnapshotIsolation means that: 
+\*  (1) Once a transaction is committed, all keys of the transaction should
+\*      be always readable or have a lock on secondary keys(eventually readable).
 \*    PROOF BY CommitConsistency, MsgMonotonicity
 \*  (2) For a given transaction, all transaction that commits after that 
 \*      transaction should have greater commit_ts than the next_ts at the
 \*      time that the given transaction commits, so as to be able to
-\*      distinguish the transactions that commits before and after
+\*      distinguish the transactions that have committed before and after
 \*      from all transactions that preserved by (1).
 \*    PROOF BY NextTsConsistency, MsgTsConsistency
 \*  (3) All aborted transactions would be always not readable.
