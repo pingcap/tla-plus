@@ -12,7 +12,7 @@
     <stringAttribute key="distributedTLC" value="off"/>
     <stringAttribute key="distributedTLCVMArgs" value=""/>
     <intAttribute key="fpBits" value="1"/>
-    <intAttribute key="fpIndex" value="41"/>
+    <intAttribute key="fpIndex" value="124"/>
     <booleanAttribute key="fpIndexRandom" value="true"/>
     <intAttribute key="maxHeapSize" value="40"/>
     <intAttribute key="maxSetSize" value="1000000"/>
@@ -37,7 +37,7 @@
     <listAttribute key="modelCorrectnessProperties">
         <listEntry value="1SnapshotIsolation"/>
     </listAttribute>
-    <intAttribute key="modelEditorOpenTabs" value="12"/>
+    <intAttribute key="modelEditorOpenTabs" value="0"/>
     <stringAttribute key="modelExpressionEval" value=""/>
     <listAttribute key="modelParameterConstants">
         <listEntry value="KEY;;{k1, k2};1;0"/>

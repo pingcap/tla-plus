@@ -46,7 +46,7 @@ VARIABLES key_data
 \* lock_key denotes the pessimistic lock performed by ServerLockKey
 \* action, the prewrite_pessimistic denotes percolator optimistic lock
 \* who is transformed from a lock_key lock by action
-\* ServerPrewritePessimistic, and prewrite_optimistic denotes the
+\* ServerPrewritePessimistic and prewrite_optimistic denotes the
 \* classic optimistic lock.
 \* 
 \* In TiKV, key_lock has an additional for_update_ts field and the
@@ -91,6 +91,7 @@ vars == <<msg_vars, client_vars, key_vars, next_ts>>
 
 SendReqs(msgs) == req_msgs' = req_msgs \union msgs
 SendResp(msg) == resp_msgs' = resp_msgs \union {msg}
+
 -----------------------------------------------------------------------------
 \* Type Definitions
 
@@ -103,6 +104,7 @@ ReqMessages ==
   \union  [start_ts : Ts, primary : KEY, type : {"cleanup"}]
   \union  [start_ts : Ts, primary : KEY, type : {"resolve_rollbacked"}]
   \union  [start_ts : Ts, primary : KEY, type : {"resolve_committed"}, commit_ts : Ts]
+  \union  [start_ts : Ts, primary : KEY, type : {"resolve_pessimistic"}] 
 
 RespMessages ==
           [start_ts : Ts, type : {"prewrited", "locked_key"}, key : KEY]
@@ -131,6 +133,7 @@ TypeOK == /\ req_msgs \in SUBSET ReqMessages
                                        for_update_ts : Ts \union {NoneTs}]]
           /\ client_key \in [CLIENT -> [locking: SUBSET KEY, prewriting : SUBSET KEY]]
           /\ next_ts \in Ts
+          
 -----------------------------------------------------------------------------
 \* Client Actions
 
@@ -215,6 +218,7 @@ ClientCommit(c) ==
                primary |-> CLIENT_PRIMARY[c],
                commit_ts |-> client_ts'[c].commit_ts]})
   /\ UNCHANGED <<resp_msgs, key_vars, client_key>>
+  
 -----------------------------------------------------------------------------
 \* Server Actions
 
@@ -386,7 +390,7 @@ ServerCleanupStaleLock ==
                     primary |-> l.primary]})
       /\ UNCHANGED <<resp_msgs, client_vars, key_vars, next_ts>>
 
-\* Clean up stale locks by checking the status of the primary key.  Commmit
+\* Clean up stale locks by checking the status of the primary key.  Commit
 \* the secondary keys if primary key is committed; otherwise rollback the
 \* transaction by rolling-back the primary key, and then also rollback the
 \* secondarys.
@@ -411,6 +415,17 @@ ServerCleanup ==
                           start_ts |-> start_ts,
                           primary |-> pk]})
             /\ UNCHANGED <<resp_msgs, client_vars, next_ts>>
+            
+            \/ 
+               /\ \E k \in KEY:
+                    \E l \in key_lock[k] :
+                      /\ l.primary = pk
+                      /\ l.ts = start_ts
+                      /\ SendReqs({[type |-> "resolve_pessimistic",
+                                    start_ts |-> start_ts,
+                                    primary |-> pk]})
+                      /\ UNCHANGED <<resp_msgs, client_vars, key_vars, next_ts>>
+          
 
 ServerResolveCommitted ==
   \E req \in req_msgs :
@@ -437,6 +452,24 @@ ServerResolveRollbacked ==
             /\ l.ts = start_ts
             /\ rollback(k, start_ts)
             /\ UNCHANGED <<msg_vars, client_vars, next_ts>>
+            
+ServerResolvePessimistic ==
+  \E req \in req_msgs :
+    /\ req.type = "resolve_pessimistic"
+    /\ LET
+        start_ts == req.start_ts
+        pk == req.primary
+       IN
+          \E l \in key_lock[pk] :
+            /\ l.type = "lock_key"
+            /\ l.primary = pk
+            /\ l.ts = start_ts
+            /\ rollback(pk, start_ts)
+            /\ SendReqs({[type |-> "resolve_rollbacked",
+                          start_ts |-> start_ts,
+                          primary |-> pk]})
+            /\ UNCHANGED <<resp_msgs, client_vars, next_ts>>
+
 -----------------------------------------------------------------------------
 \* Specification
 
@@ -473,8 +506,10 @@ Next ==
   \/ ServerCleanup
   \/ ServerResolveCommitted
   \/ ServerResolveRollbacked
+  \/ ServerResolvePessimistic
 
 Spec == Init /\ [][Next]_vars
+
 -----------------------------------------------------------------------------
 \* Consistency Invariants
 
@@ -518,7 +553,7 @@ AbortConsistency ==
 
 \* For each write, the commit_ts should be strictly greater than the
 \* start_ts and have data written into key_data[k].  For each rollback,
-\* the commit_ts should equals to the start_ts.
+\* the commit_ts should equal to the start_ts.
 WriteConsistency ==
   \A k \in KEY :
     \A w \in key_write[k] :
@@ -541,6 +576,7 @@ UniqueWrite ==
   \A k \in KEY :
     \A w, w2 \in key_write[k] :
       (w.start_ts = w2.start_ts) => (w = w2)
+      
 -----------------------------------------------------------------------------
 \* Snapshot Isolation
 
@@ -569,7 +605,7 @@ MsgTsConsistency ==
 \*      transaction should have greater commit_ts than the next_ts at the
 \*      time that the given transaction commits, so as to be able to
 \*      distinguish the transactions that have committed before and after
-\*      from all transactions that preserved by (1).
+\*      from all transactions that are preserved by (1).
 \*    PROOF BY NextTsConsistency, MsgTsConsistency
 \*  (3) All aborted transactions would be always not readable.
 \*    PROOF BY AbortConsistency, MsgMonotonicity

@@ -5,3 +5,7 @@ states/
 **/*.toolbox/*___*_SnapShot_*.launch
 **/*.toolbox/.project
 **/*.toolbox/.settings/
+**/*.toolbox/*.aux
+**/*.toolbox/*.log
+**/*.toolbox/*.tex
+**/*.toolbox/*.pdf
