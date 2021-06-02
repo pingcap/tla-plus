@@ -103,6 +103,8 @@ ReqMessages ==
   \union  [start_ts : Ts, primary : KEY, type : {"cleanup"}]
   \union  [start_ts : Ts, primary : KEY, type : {"resolve_rollbacked"}]
   \union  [start_ts : Ts, primary : KEY, type : {"resolve_committed"}, commit_ts : Ts]
+  \union  [start_ts : Ts, primary : KEY, type : {"determine_txn_status_req"}, 
+            rollback_if_not_exist : BOOLEAN, resolving_pessimistic_lock : BOOLEAN]
 
 RespMessages ==
           [start_ts : Ts, type : {"prewrited", "locked_key"}, key : KEY]
@@ -111,6 +113,14 @@ RespMessages ==
                                   "commit_aborted",
                                   "prewrite_aborted",
                                   "lock_key_aborted"}]
+  \union  [start_ts : Ts, type: {"determine_txn_status_resp"},
+            status : {"RolledBack",
+                      "TTLExpire",
+                      "LockNotExist",
+                      "Uncommitted",
+                      "Committed",
+                      "PessimisticRollBack",
+                      "LockNotExistDoNothing"}]
 
 TypeOK == /\ req_msgs \in SUBSET ReqMessages
           /\ resp_msgs \in SUBSET RespMessages
