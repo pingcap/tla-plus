@@ -100,10 +100,7 @@ ReqMessages ==
   \union  [start_ts : Ts, primary : KEY, type : {"prewrite_optimistic"}, key : KEY]
   \union  [start_ts : Ts, primary : KEY, type : {"prewrite_pessimistic"}, key : KEY]
   \union  [start_ts : Ts, primary : KEY, type : {"commit"}, commit_ts : Ts]
-  \union  [start_ts : Ts, primary : KEY, type : {"cleanup"}]
-  \union  [start_ts : Ts, primary : KEY, type : {"resolve_rollbacked"}]
-  \union  [start_ts : Ts, primary : KEY, type : {"resolve_committed"}, commit_ts : Ts]
-  \union  [start_ts : Ts, primary : KEY, type : {"determine_txn_status_req"}, 
+  \union  [start_ts : Ts, primary : KEY, type : {"check_txn_status_req"}, 
             rollback_if_not_exist : BOOLEAN, resolving_pessimistic_lock : BOOLEAN]
 
 RespMessages ==
@@ -113,13 +110,13 @@ RespMessages ==
                                   "commit_aborted",
                                   "prewrite_aborted",
                                   "lock_key_aborted"}]
-  \union  [start_ts : Ts, type: {"determine_txn_status_resp"},
-            status : {"RolledBack",
-                      "TTLExpire",
-                      "LockNotExist",
-                      "Uncommitted",
+  \union  [start_ts : Ts, type: {"check_txn_status_resp"},
+            status : {"Rollbacked",
+                      "PessimisticRollbacked",
                       "Committed",
-                      "PessimisticRollBack",
+                      "Uncommitted",
+                      "MinCommitTsPushed",
+                      "ErrTxnNotFound",
                       "LockNotExistDoNothing"}]
 
 TypeOK == /\ req_msgs \in SUBSET ReqMessages
@@ -391,36 +388,140 @@ ServerCommit ==
 ServerCleanupStaleLock ==
   \E k \in KEY :
     \E l \in key_lock[k] :
-      /\ SendReqs({[type |-> "cleanup",
+      \* the `resolve_pessimistic_lock` field is set to *TRUE*
+      CASE l.type \in {"lock_key"} ->
+        /\ SendReqs({[type |-> "check_txn_status_req",
                     start_ts |-> l.ts,
-                    primary |-> l.primary]})
-      /\ UNCHANGED <<resp_msgs, client_vars, key_vars, next_ts>>
+                    primary |-> l.primary, 
+                    rollback_if_not_exist |-> TRUE,
+                    resolve_pessimistic_lock |-> TRUE
+                    ]})
+        /\ UNCHANGED <<resp_msgs, client_vars, key_vars, next_ts>>
+        \/ /\ SendReqs({[type |-> "check_txn_status_req",
+                    start_ts |-> l.ts,
+                    primary |-> l.primary, 
+                    rollback_if_not_exist |-> FALSE,
+                    resolve_pessimistic_lock |-> TRUE
+                    ]})
+           /\ UNCHANGED <<resp_msgs, client_vars, key_vars, next_ts>>
+        
+      \* the `resolve_pessimistic_lock` field is set to *FALSE*
+      [] l.type \in {"prewrite_optimistic", "prewrite_pessimistic"} ->
+        /\ SendReqs({[type |-> "check_txn_status_req",
+                     start_ts |-> l.ts,
+                     primary |-> l.primary, 
+                     rollback_if_not_exist |-> TRUE,
+                     resolve_pessimistic_lock |-> FALSE
+                     ]})
+        /\ UNCHANGED <<resp_msgs, client_vars, key_vars, next_ts>>
+        \/ /\ SendReqs({[type |-> "check_txn_status_req",
+                    start_ts |-> l.ts,
+                    primary |-> l.primary, 
+                    rollback_if_not_exist |-> FALSE,
+                    resolve_pessimistic_lock |-> FALSE
+                    ]})
+           /\ UNCHANGED <<resp_msgs, client_vars, key_vars, next_ts>>
 
-\* Clean up stale locks by checking the status of the primary key.  Commmit
+\* Clean up stale locks by checking the status of the primary key.  Commit
 \* the secondary keys if primary key is committed; otherwise rollback the
 \* transaction by rolling-back the primary key, and then also rollback the
 \* secondarys.
-ServerCleanup ==
+ServerCheckTxnStatus ==
   \E req \in req_msgs :
-    /\ req.type = "cleanup"
+    /\ req.type = "check_txn_status_req"
     /\ LET
           pk == req.primary
           start_ts == req.start_ts
+          pk_lock == key_lock[pk]
           committed == {w \in key_write[pk] : w.start_ts = start_ts /\ w.type = "write"}
+          rollbacked == {r \in key_write[pk] : r.start_ts = start_ts /\ r.type = "rollback"}
        IN
-          IF committed /= {}
+          IF committed /= {} 
           THEN
             /\ SendReqs({[type |-> "resolve_committed",
                           start_ts |-> start_ts,
                           primary |-> pk,
                           commit_ts |-> w.ts] : w \in committed})
-            /\ UNCHANGED <<resp_msgs, client_vars, key_vars, next_ts>>
+            /\ SendResp({[type |-> "check_txn_status_resp",
+                          start_ts |-> start_ts,
+                          primary |-> pk,
+                          status |-> "Committed"]})
+            /\ UNCHANGED <<client_vars, key_vars, next_ts>>
           ELSE
+          IF rollbacked /= {}
+          THEN
             /\ rollback(pk, start_ts)
             /\ SendReqs({[type |-> "resolve_rollbacked",
                           start_ts |-> start_ts,
                           primary |-> pk]})
-            /\ UNCHANGED <<resp_msgs, client_vars, next_ts>>
+            /\ SendResp({[type |-> "check_txn_status_resp",
+                          start_ts |-> start_ts,
+                          primary |-> pk,
+                          status |-> "Rollbacked"]})
+            /\ UNCHANGED <<client_vars, next_ts>>
+
+          \* No commit or rollback record
+          ELSE 
+          IF \E lock \in pk_lock : pk_lock.ts = start_ts
+          \* Has a matching(lock_ts or start_ts) lock
+          THEN
+            \/
+                \* TTL expire
+                IF \E lock \in pk_lock :
+                    lock.type = "lock_key"
+                /\ req.resolving_pessimistic_lock = TRUE
+                THEN
+                /\ key_lock' = [key_lock EXCEPT ![pk] = {}] 
+                /\ SendResp({[type |-> "check_txn_status_resp",
+                              start_ts |-> start_ts,
+                              primary |-> pk,
+                              status |-> ""]})
+                /\ UNCHANGED <<client_vars, next_ts>>
+                ELSE
+                /\ rollback(pk, start_ts)
+                /\ SendReqs({[type |-> "resolve_rollbacked",
+                                start_ts |-> start_ts,
+                                primary |-> pk]})
+                /\ SendResp({[type |-> "check_txn_status_resp",
+                              start_ts |-> start_ts,
+                              primary |-> pk,
+                              status |-> "PessimisticRollbacked"]})
+                /\ UNCHANGED <<client_vars, next_ts>>
+            \/
+                \* uncommitted
+                /\ SendResp({[type |-> "check_txn_status_resp",
+                              start_ts |-> start_ts,
+                              primary |-> pk,
+                              status |-> "Uncommitted"]})
+                /\ UNCHANGED <<client_vars, next_ts>>
+          ELSE
+          \* LockNotExist
+            IF ~ req.rollback_if_not_exist 
+            THEN
+                /\ SendResp({[type |-> "check_txn_status_resp",
+                              start_ts |-> start_ts,
+                              primary |-> pk,
+                              status |-> "ErrTxnNotFound"]})
+                /\ UNCHANGED <<client_vars, next_ts>>
+            ELSE
+            IF req.resolving_pessimistic_lock
+            THEN
+                /\ SendResp({[type |-> "check_txn_status_resp",
+                              start_ts |-> start_ts,
+                              primary |-> pk,
+                              status |-> "LockNotExistDoNothing"]})
+                /\ UNCHANGED <<client_vars, next_ts>>
+            ELSE
+                /\ rollback(pk, start_ts)
+                /\ SendReqs({[type |-> "resolve_rollbacked",
+                                start_ts |-> start_ts,
+                                primary |-> pk]})
+                /\ SendResp({[type |-> "check_txn_status_resp",
+                              start_ts |-> start_ts,
+                              primary |-> pk,
+                              status |-> "Rollbacked"]})
+                /\ UNCHANGED <<client_vars, next_ts>>
+
 
 ServerResolveCommitted ==
   \E req \in req_msgs :
@@ -480,7 +581,7 @@ Next ==
   \/ ServerPrewriteOptimistic
   \/ ServerCommit
   \/ ServerCleanupStaleLock
-  \/ ServerCleanup
+  \/ ServerCheckTxnStatus
   \/ ServerResolveCommitted
   \/ ServerResolveRollbacked
 
