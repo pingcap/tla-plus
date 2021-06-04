@@ -100,6 +100,8 @@ ReqMessages ==
   \union  [start_ts : Ts, primary : KEY, type : {"prewrite_optimistic"}, key : KEY]
   \union  [start_ts : Ts, primary : KEY, type : {"prewrite_pessimistic"}, key : KEY]
   \union  [start_ts : Ts, primary : KEY, type : {"commit"}, commit_ts : Ts]
+  \union  [start_ts : Ts, primary : KEY, type : {"resolve_rollbacked"}]
+  \union  [start_ts : Ts, primary : KEY, type : {"resolve_committed"}, commit_ts : Ts]
   \union  [start_ts : Ts, primary : KEY, type : {"check_txn_status_req"}, 
             rollback_if_not_exist : BOOLEAN, resolving_pessimistic_lock : BOOLEAN]
 
