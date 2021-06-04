@@ -100,11 +100,15 @@ ReqMessages ==
   \union  [start_ts : Ts, primary : KEY, type : {"prewrite_optimistic"}, key : KEY]
   \union  [start_ts : Ts, primary : KEY, type : {"prewrite_pessimistic"}, key : KEY]
   \union  [start_ts : Ts, primary : KEY, type : {"commit"}, commit_ts : Ts]
-  \union  [start_ts : Ts, primary : KEY, type : {"cleanup"}]
   \union  [start_ts : Ts, primary : KEY, type : {"resolve_rollbacked"}]
   \union  [start_ts : Ts, primary : KEY, type : {"resolve_committed"}, commit_ts : Ts]
-  \union  [start_ts : Ts, primary : KEY, type : {"determine_txn_status_req"}, 
-            rollback_if_not_exist : BOOLEAN, resolving_pessimistic_lock : BOOLEAN]
+  \* In TiKV, there's an extra flag "rollback_if_not_exist" in the check_txn_status
+  \* request.  If the primary key lock is missing (and no record in the write column),
+  \* there are two cases: the prewrite request of the primary key is delayed, or is lost
+  \* due to client (TiDB) crash.  To distinguish these two, it must wait until the
+  \* TTL of the lock to be resolved expired.  In the TLA+ spec, the TTL is considered 
+  \* constantly expired when the action is taken, so there's no need to model the flag.
+  \union  [start_ts : Ts, primary : KEY, type : {"check_txn_status"}, resolving_pessimistic_lock : BOOLEAN]
 
 RespMessages ==
           [start_ts : Ts, type : {"prewrited", "locked_key"}, key : KEY]
@@ -113,14 +117,6 @@ RespMessages ==
                                   "commit_aborted",
                                   "prewrite_aborted",
                                   "lock_key_aborted"}]
-  \union  [start_ts : Ts, type: {"determine_txn_status_resp"},
-            status : {"RolledBack",
-                      "TTLExpire",
-                      "LockNotExist",
-                      "Uncommitted",
-                      "Committed",
-                      "PessimisticRollBack",
-                      "LockNotExistDoNothing"}]
 
 TypeOK == /\ req_msgs \in SUBSET ReqMessages
           /\ resp_msgs \in SUBSET RespMessages
@@ -391,36 +387,63 @@ ServerCommit ==
 ServerCleanupStaleLock ==
   \E k \in KEY :
     \E l \in key_lock[k] :
-      /\ SendReqs({[type |-> "cleanup",
+      /\ SendReqs({[type |-> "check_txn_status",
                     start_ts |-> l.ts,
-                    primary |-> l.primary]})
+                    primary |-> l.primary,
+                    resolving_pessimistic_lock |-> l.type = "lock_key"
+                    ]})
       /\ UNCHANGED <<resp_msgs, client_vars, key_vars, next_ts>>
 
-\* Clean up stale locks by checking the status of the primary key.  Commmit
-\* the secondary keys if primary key is committed; otherwise rollback the
-\* transaction by rolling-back the primary key, and then also rollback the
-\* secondarys.
-ServerCleanup ==
+\* Clean up stale locks by checking the status of the primary key.  It
+\* can be divided into two cases: pk_lock exists or not.  Note that it is 
+\* hard to model the TTL in TLA+ spec, so instead, the TTL is considered 
+\* constantly expired when the action is taken.
+\* The client does not care about the resp message, it cares about whether
+\* the lock is resolved, and resolving the lock is actually resolve the 
+\* status of the corresponding transaction.  Since, in the TLA+ spec,
+\* we ignored the `check_txn_status` response message.
+ServerCheckTxnStatus ==
   \E req \in req_msgs :
-    /\ req.type = "cleanup"
+    /\ req.type = "check_txn_status"
     /\ LET
           pk == req.primary
           start_ts == req.start_ts
           committed == {w \in key_write[pk] : w.start_ts = start_ts /\ w.type = "write"}
        IN
-          IF committed /= {}
+          IF \E lock \in key_lock[pk] : lock.ts = start_ts
+          \* Found the matching lock whose TTL is expired.
           THEN
-            /\ SendReqs({[type |-> "resolve_committed",
-                          start_ts |-> start_ts,
-                          primary |-> pk,
-                          commit_ts |-> w.ts] : w \in committed})
-            /\ UNCHANGED <<resp_msgs, client_vars, key_vars, next_ts>>
+            IF
+              \* Pessimistic lock will be unlocked directly without rollback record.
+              \E lock \in key_lock[pk] :
+                /\ lock.ts = start_ts
+                /\ lock.type = "lock_key"
+                /\ req.resolving_pessimistic_lock = TRUE
+            THEN
+              /\ key_lock' = [key_lock EXCEPT ![pk] = {}]
+              /\ UNCHANGED <<msg_vars, key_data, key_write, client_vars, next_ts>>
+            ELSE
+              /\ rollback(pk, start_ts)
+              /\ SendReqs({[type |-> "resolve_rollbacked",
+                            start_ts |-> start_ts,
+                            primary |-> pk]})
+              /\ UNCHANGED <<resp_msgs, client_vars, next_ts>>
+          \* Lock not found or start_ts on the lock mismatches.
           ELSE
-            /\ rollback(pk, start_ts)
-            /\ SendReqs({[type |-> "resolve_rollbacked",
-                          start_ts |-> start_ts,
-                          primary |-> pk]})
-            /\ UNCHANGED <<resp_msgs, client_vars, next_ts>>
+            IF committed /= {} THEN
+              /\ SendReqs({[type |-> "resolve_committed",
+                            start_ts |-> start_ts,
+                            primary |-> pk,
+                            commit_ts |-> w.ts] : w \in committed})
+              /\ UNCHANGED <<resp_msgs, client_vars, key_vars, next_ts>>
+            ELSE IF req.resolving_pessimistic_lock = TRUE THEN
+              /\ UNCHANGED <<vars>>
+            ELSE
+              /\ rollback(pk, start_ts)
+              /\ SendReqs({[type |-> "resolve_rollbacked",
+                            start_ts |-> start_ts,
+                            primary |-> pk]})
+              /\ UNCHANGED <<resp_msgs, client_vars, next_ts>>
 
 ServerResolveCommitted ==
   \E req \in req_msgs :
@@ -480,7 +503,7 @@ Next ==
   \/ ServerPrewriteOptimistic
   \/ ServerCommit
   \/ ServerCleanupStaleLock
-  \/ ServerCleanup
+  \/ ServerCheckTxnStatus
   \/ ServerResolveCommitted
   \/ ServerResolveRollbacked
 
