@@ -436,7 +436,8 @@ ServerCheckTxnStatus ==
           start_ts == req.start_ts
           pk_lock == key_lock[pk]
           committed == {w \in key_write[pk] : w.start_ts = start_ts /\ w.type = "write"}
-          rollbacked == {r \in key_write[pk] : r.start_ts = start_ts /\ r.type = "rollback"}
+          rollbacked == {w \in key_write[pk] : w.start_ts = start_ts /\ w.type = "rollback"}
+
        IN
           IF committed /= {} 
           THEN
