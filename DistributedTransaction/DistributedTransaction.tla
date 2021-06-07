@@ -400,7 +400,8 @@ ServerCheckTxnStatus ==
           start_ts == req.start_ts
           pk_lock == key_lock[pk]
           committed == {w \in key_write[pk] : w.start_ts = start_ts /\ w.type = "write"}
-          rollbacked == {r \in key_write[pk] : r.start_ts = start_ts /\ r.type = "rollback"}
+          rollbacked == {w \in key_write[pk] : w.start_ts = start_ts /\ w.type = "rollback"}
+
        IN
           IF \E lock \in pk_lock : lock.ts = start_ts THEN
           \* Has a matching(lock_ts or start_ts) lock
