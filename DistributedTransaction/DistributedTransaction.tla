@@ -388,52 +388,52 @@ ServerCleanupStaleLock ==
                     ]})
       /\ UNCHANGED <<resp_msgs, client_vars, key_vars, next_ts>>
 
-\* Clean up stale locks by checking the status of the primary key.  Commit
-\* the secondary keys if primary key is committed; otherwise rollback the
-\* transaction by rolling-back the primary key, and then also rollback the
-\* secondarys.
+\* Clean up stale locks by checking the status of the primary key.  It
+\* can be divided into two cases: pk_lock exists or not. Note that it is 
+\* hard to reflect the TTL-related things int the TLA+ spec, so the TTL 
+\* expired actions is done without time checkings.
 ServerCheckTxnStatus ==
   \E req \in req_msgs :
     /\ req.type = "check_txn_status"
     /\ LET
           pk == req.primary
           start_ts == req.start_ts
-          pk_lock == key_lock[pk]
           committed == {w \in key_write[pk] : w.start_ts = start_ts /\ w.type = "write"}
-          rollbacked == {w \in key_write[pk] : w.start_ts = start_ts /\ w.type = "rollback"}
-
        IN
-          IF \E lock \in pk_lock : lock.ts = start_ts THEN
-          \* Has a matching(lock_ts or start_ts) lock
-          \/
-            \* TTL expire
-            IF \E lock \in pk_lock :
-                lock.type = "lock_key"
-               /\ req.resolving_pessimistic_lock = TRUE
+          IF \E lock \in key_lock[pk] : lock.ts = start_ts
+          \* Found the matching lock whose TTL is expired.
+          THEN
+            IF
+              \* Pessimistic lock will be unlocked directly without rollback record.
+              \E lock \in key_lock[pk] :
+                /\ lock.ts = start_ts
+                /\ lock.type = "lock_key"
+                /\ req.resolving_pessimistic_lock = TRUE
             THEN
-              /\ key_lock' = [key_lock EXCEPT ![pk] = {}] 
-              /\ UNCHANGED <<req_msgs, resp_msgs, key_data, key_write, client_vars, next_ts>>
+              /\ key_lock' = [key_lock EXCEPT ![pk] = {}]
+              /\ UNCHANGED <<msg_vars, key_data, key_write, client_vars, next_ts>>
             ELSE
               /\ rollback(pk, start_ts)
               /\ SendReqs({[type |-> "resolve_rollbacked",
                             start_ts |-> start_ts,
                             primary |-> pk]})
               /\ UNCHANGED <<resp_msgs, client_vars, next_ts>>
+          \* Lock not found or start_ts on the lock mismatches.
           ELSE
-             \* LockNotExist
             IF committed /= {} THEN
-            /\ SendReqs({[type |-> "resolve_committed",
-                          start_ts |-> start_ts,
-                          primary |-> pk,
-                          commit_ts |-> w.ts] : w \in committed})
-            /\ UNCHANGED <<resp_msgs, client_vars, key_vars, next_ts>>
-            ELSE 
-            /\ rollbacked /= {}
-            /\ rollback(pk, start_ts)
-            /\ SendReqs({[type |-> "resolve_rollbacked",
-                          start_ts |-> start_ts,
-                          primary |-> pk]})
-            /\ UNCHANGED <<resp_msgs, client_vars, next_ts>>
+              /\ SendReqs({[type |-> "resolve_committed",
+                            start_ts |-> start_ts,
+                            primary |-> pk,
+                            commit_ts |-> w.ts] : w \in committed})
+              /\ UNCHANGED <<resp_msgs, client_vars, key_vars, next_ts>>
+            ELSE IF req.resolving_pessimistic_lock = TRUE THEN
+              /\ UNCHANGED <<vars>>
+            ELSE
+              /\ rollback(pk, start_ts)
+              /\ SendReqs({[type |-> "resolve_rollbacked",
+                            start_ts |-> start_ts,
+                            primary |-> pk]})
+              /\ UNCHANGED <<resp_msgs, client_vars, next_ts>>
 
 ServerResolveCommitted ==
   \E req \in req_msgs :
