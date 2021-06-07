@@ -390,8 +390,9 @@ ServerCleanupStaleLock ==
 
 \* Clean up stale locks by checking the status of the primary key.  It
 \* can be divided into two cases: pk_lock exists or not. Note that it is 
-\* hard to reflect the TTL-related things int the TLA+ spec, so the TTL 
-\* expired actions is done without time checkings.
+\* hard to model the TTL in TLA+ spec, so instead, the TTL is
+\* considered constantly expired when the action is taken.
+
 ServerCheckTxnStatus ==
   \E req \in req_msgs :
     /\ req.type = "check_txn_status"
