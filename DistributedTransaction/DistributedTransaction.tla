@@ -102,6 +102,12 @@ ReqMessages ==
   \union  [start_ts : Ts, primary : KEY, type : {"commit"}, commit_ts : Ts]
   \union  [start_ts : Ts, primary : KEY, type : {"resolve_rollbacked"}]
   \union  [start_ts : Ts, primary : KEY, type : {"resolve_committed"}, commit_ts : Ts]
+  \* In TiKV, there's an extra flag "rollback_if_not_exist" in the check_txn_status
+  \* request.  If the primary key lock is missing (and no record in the write column),
+  \* there are two cases: the prewrite request of the primary key is delayed, or is lost
+  \* due to client (TiDB) crash.  To distinguish these two, it must wait until the
+  \* TTL of the lock to be resolved expired.  In the TLA+ spec, the TTL is considered 
+  \* constantly expired when the action is taken, so there's no need to model the flag.
   \union  [start_ts : Ts, primary : KEY, type : {"check_txn_status"}, resolving_pessimistic_lock : BOOLEAN]
 
 RespMessages ==
@@ -389,10 +395,13 @@ ServerCleanupStaleLock ==
       /\ UNCHANGED <<resp_msgs, client_vars, key_vars, next_ts>>
 
 \* Clean up stale locks by checking the status of the primary key.  It
-\* can be divided into two cases: pk_lock exists or not. Note that it is 
-\* hard to model the TTL in TLA+ spec, so instead, the TTL is
-\* considered constantly expired when the action is taken.
-
+\* can be divided into two cases: pk_lock exists or not.  Note that it is 
+\* hard to model the TTL in TLA+ spec, so instead, the TTL is considered 
+\* constantly expired when the action is taken.
+\* The client does not care about the resp message, it cares about whether
+\* the lock is resolved, and resolving the lock is actually resolve the 
+\* status of the corresponding transaction.  Since, in the TLA+ spec,
+\* we ignored the `check_txn_status` response message.
 ServerCheckTxnStatus ==
   \E req \in req_msgs :
     /\ req.type = "check_txn_status"
