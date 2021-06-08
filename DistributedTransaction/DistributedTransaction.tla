@@ -100,9 +100,26 @@ ReqMessages ==
   \union  [start_ts : Ts, primary : KEY, type : {"prewrite_optimistic"}, key : KEY]
   \union  [start_ts : Ts, primary : KEY, type : {"prewrite_pessimistic"}, key : KEY]
   \union  [start_ts : Ts, primary : KEY, type : {"commit"}, commit_ts : Ts]
-  \union  [start_ts : Ts, primary : KEY, type : {"cleanup"}]
   \union  [start_ts : Ts, primary : KEY, type : {"resolve_rollbacked"}]
   \union  [start_ts : Ts, primary : KEY, type : {"resolve_committed"}, commit_ts : Ts]
+
+  \* In TiKV, there's an extra flag `rollback_if_not_exist` in the `check_txn_status` request.
+  \*
+  \* Because the client prewrites the primary key and secondary key in parallel, it's possible
+  \* that the primary key lock is missing and also no commit or rollback record for the transaction
+  \* is found in the write CF, while there is a lock on the secondary key (so other transaction
+  \* is blocked, therefore this check_txn_status is sent). And there are two possible cases:
+  \*
+  \*    1. The prewrite request for the primary key has not reached yet.
+  \*    2. The client is crashed after sending the prewrite request for the secondary key.
+  \*
+  \* In order to address the first case, the client sending `check_txn_status` should not rollback
+  \* the primary key until the TTL on the secondary key is expired, and thus, `rollback_if_not_exist`
+  \* should be set to false before the TTL expires (and set true afterward).
+  \*
+  \* In TLA+ spec, the TTL is considered constantly expired when the action is taken, so the
+  \* `rollback_if_not_exist` is assumed true, thus no need to carry it in the message.
+  \union  [start_ts : Ts, primary : KEY, type : {"check_txn_status"}, resolving_pessimistic_lock : BOOLEAN]
 
 RespMessages ==
           [start_ts : Ts, type : {"prewrited", "locked_key"}, key : KEY]
@@ -381,36 +398,68 @@ ServerCommit ==
 ServerCleanupStaleLock ==
   \E k \in KEY :
     \E l \in key_lock[k] :
-      /\ SendReqs({[type |-> "cleanup",
+      /\ SendReqs({[type |-> "check_txn_status",
                     start_ts |-> l.ts,
-                    primary |-> l.primary]})
+                    primary |-> l.primary,
+                    resolving_pessimistic_lock |-> l.type = "lock_key"
+                    ]})
       /\ UNCHANGED <<resp_msgs, client_vars, key_vars, next_ts>>
 
-\* Clean up stale locks by checking the status of the primary key.  Commmit
-\* the secondary keys if primary key is committed; otherwise rollback the
-\* transaction by rolling-back the primary key, and then also rollback the
-\* secondarys.
-ServerCleanup ==
+\* Clean up the stale transaction by checking the status of the primary key.
+\*
+\* In practice, the transaction will be rolled back if TTL on the lock is expired. But
+\* because it is hard to model the TTL in TLA+ spec, the TTL is considered constantly
+\* expired when the action is taken.
+\*
+\* Moreover, TiKV will send a response for `TxnStatus` to the client, and then depending
+\* on the `TxnStatus`, the client will send `resolve_rollback` or `resolve_commit` to the
+\* secondary keys to clean up stale locks.  In the TLA+ spec, the response to `check_txn_status`
+\* is omitted and TiKV will directly send `resolve_rollback` or `resolve_commit` message to
+\* secondary keys, because the action of client sending resolve message by proxying the
+\* `TxnStatus` from TiKV does not change the state of the client, therefore is equal to directly
+\* sending resolve message by TiKV
+ServerCheckTxnStatus ==
   \E req \in req_msgs :
-    /\ req.type = "cleanup"
+    /\ req.type = "check_txn_status"
     /\ LET
           pk == req.primary
           start_ts == req.start_ts
           committed == {w \in key_write[pk] : w.start_ts = start_ts /\ w.type = "write"}
        IN
-          IF committed /= {}
+          IF \E lock \in key_lock[pk] : lock.ts = start_ts
+          \* Found the matching lock whose TTL is expired.
           THEN
-            /\ SendReqs({[type |-> "resolve_committed",
-                          start_ts |-> start_ts,
-                          primary |-> pk,
-                          commit_ts |-> w.ts] : w \in committed})
-            /\ UNCHANGED <<resp_msgs, client_vars, key_vars, next_ts>>
+            IF
+              \* Pessimistic lock will be unlocked directly without rollback record.
+              \E lock \in key_lock[pk] :
+                /\ lock.ts = start_ts
+                /\ lock.type = "lock_key"
+                /\ req.resolving_pessimistic_lock = TRUE
+            THEN
+              /\ key_lock' = [key_lock EXCEPT ![pk] = {}]
+              /\ UNCHANGED <<msg_vars, key_data, key_write, client_vars, next_ts>>
+            ELSE
+              /\ rollback(pk, start_ts)
+              /\ SendReqs({[type |-> "resolve_rollbacked",
+                            start_ts |-> start_ts,
+                            primary |-> pk]})
+              /\ UNCHANGED <<resp_msgs, client_vars, next_ts>>
+          \* Lock not found or start_ts on the lock mismatches.
           ELSE
-            /\ rollback(pk, start_ts)
-            /\ SendReqs({[type |-> "resolve_rollbacked",
-                          start_ts |-> start_ts,
-                          primary |-> pk]})
-            /\ UNCHANGED <<resp_msgs, client_vars, next_ts>>
+            IF committed /= {} THEN
+              /\ SendReqs({[type |-> "resolve_committed",
+                            start_ts |-> start_ts,
+                            primary |-> pk,
+                            commit_ts |-> w.ts] : w \in committed})
+              /\ UNCHANGED <<resp_msgs, client_vars, key_vars, next_ts>>
+            ELSE IF req.resolving_pessimistic_lock = TRUE THEN
+              /\ UNCHANGED <<vars>>
+            ELSE
+              /\ rollback(pk, start_ts)
+              /\ SendReqs({[type |-> "resolve_rollbacked",
+                            start_ts |-> start_ts,
+                            primary |-> pk]})
+              /\ UNCHANGED <<resp_msgs, client_vars, next_ts>>
 
 ServerResolveCommitted ==
   \E req \in req_msgs :
@@ -470,7 +519,7 @@ Next ==
   \/ ServerPrewriteOptimistic
   \/ ServerCommit
   \/ ServerCleanupStaleLock
-  \/ ServerCleanup
+  \/ ServerCheckTxnStatus
   \/ ServerResolveCommitted
   \/ ServerResolveRollbacked
 
