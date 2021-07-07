@@ -96,6 +96,7 @@ vars == <<msg_vars, client_vars, key_vars, next_ts>>
 
 SendReqs(msgs) == req_msgs' = req_msgs \union msgs
 SendResp(msg) == resp_msgs' = resp_msgs \union {msg}
+SendResps(msgs) == resp_msgs' = resp_msgs \union msgs
 -----------------------------------------------------------------------------
 \* Type Definitions
 
@@ -136,9 +137,9 @@ RespMessages ==
   \* and putting the value in the response can reduce communication. Also, as mentioned
   \* above, we don’t care about the actual value here, so a timestamp can be used 
   \* instead of the value.
-  \union  [start_ts : Ts, type : {"locked_key"}, key : KEY, value_ts :  Ts]
-  \union  [start_ts : Ts, type : {"lock_failed"}, key : KEY, latest_commit_ts : Ts,
-           lock_ts : Ts, lock_type : {"no_lock", "lock_key", "prewrite_pessimistic", "prewrite_optimistic"}]
+  \union  [start_ts : Ts, type : {"locked_key"}, key : KEY, value_ts : Ts \union {NoneTs}]
+  \union  [start_ts : Ts, type : {"lock_failed"}, key : KEY, latest_commit_ts : Ts \union {NoneTs},
+           lock_ts : Ts \union {NoneTs}, lock_type : {"no_lock", "lock_key", "prewrite_pessimistic", "prewrite_optimistic"}]
   \union  [start_ts : Ts, type : {"committed",
                                   "commit_aborted",
                                   "prewrite_aborted",
@@ -173,6 +174,7 @@ TypeOK == /\ req_msgs \in SUBSET ReqMessages
                                        for_update_ts : Ts \union {NoneTs},
                                        min_commit_ts : Ts \union {NoneTs}]]
           /\ client_key \in [CLIENT -> [locking: SUBSET KEY, prewriting : SUBSET KEY]]
+          /\ \A c \in CLIENT: client_key[c].locking \intersect client_key[c].prewriting = {}
           /\ next_ts \in Ts
 -----------------------------------------------------------------------------
 \* Client Actions
@@ -190,7 +192,7 @@ ClientReadKey(c) ==
   /\ UNCHANGED <<resp_msgs, client_key, key_vars>>
 
 ClientLockKey(c) ==
-  /\ client_state[c] = "reading"
+  /\ client_state[c] = "init"
   /\ client_state' = [client_state EXCEPT ![c] = "locking"]
   /\ client_ts' = [client_ts EXCEPT ![c].start_ts = next_ts, ![c].for_update_ts = next_ts]
   /\ next_ts' = next_ts + 1
@@ -215,35 +217,38 @@ ClientLockedKey(c) ==
 ClientRetryLockKey(c) ==
   /\ client_state[c] = "locking"
   /\ \E resp \in resp_msgs :
-      /\ resp.type = "lock_failed"
-      /\ resp.start_ts = client_ts[c].start_ts
-      /\ resp.latest_commit_ts > client_ts[c].for_update_ts
-      /\ client_ts' = [client_ts EXCEPT ![c].for_update_ts = resp.latest_commit_ts]
-      /\ IF resp.lock_type \in {"lock_key"}
-         THEN
-          /\ SendReqs({[type |-> "check_txn_status",
-                        start_ts |-> client_ts[c].start_ts,
-                        caller_start_ts |-> next_ts,
-                        primary |-> CLIENT_PRIMARY[c],
-                        resoving_pessimistic_lock |-> TRUE]})
-          /\ next_ts' = next_ts + 1
-          /\ UNCHANGED <<resp_msgs, key_vars, client_state, client_key>>
-          ELSE IF ~ resp.lock_type = "no_lock"
-          THEN
-            /\ SendReqs({[type |-> "check_txn_status",
-                        start_ts |-> client_ts[c].start_ts,
-                        caller_start_ts |-> next_ts,
-                        primary |-> CLIENT_PRIMARY[c],
-                        resoving_pessimistic_lock |-> FALSE]})
-            /\ next_ts' = next_ts + 1
-            /\ UNCHANGED <<resp_msgs, key_vars, client_state, client_key>>
-          ELSE
-            /\ UNCHANGED <<resp_msgs, key_vars, client_state, client_key, next_ts>>
-      /\ SendReqs({[type |-> "lock_key",
-                    start_ts |-> client_ts'[c].start_ts,
-                    primary |-> CLIENT_PRIMARY[c],
-                    key |-> resp.key,
-                    for_update_ts |-> client_ts'[c].for_update_ts]})
+      \/ /\ resp.type = "lock_failed"
+         /\ resp.start_ts = client_ts[c].start_ts
+         /\ IF resp.lock_type = "lock_key" /\ ~ resp.lock_ts = client_ts[c].start_ts 
+            THEN
+              /\ SendReqs({[type |-> "check_txn_status",
+                            start_ts |-> client_ts[c].start_ts,
+                            caller_start_ts |-> next_ts,
+                            primary |-> CLIENT_PRIMARY[c],
+                            resolving_pessimistic_lock |-> TRUE]})
+              /\ next_ts' = next_ts + 1
+              /\ UNCHANGED <<resp_msgs, key_vars, client_vars>>
+            ELSE IF ~ resp.lock_type = "no_lock"
+            THEN
+              /\ SendReqs({[type |-> "check_txn_status",
+                            start_ts |-> client_ts[c].start_ts,
+                            caller_start_ts |-> next_ts,
+                            primary |-> CLIENT_PRIMARY[c],
+                            resolving_pessimistic_lock |-> FALSE]})
+              /\ next_ts' = next_ts + 1
+              /\ UNCHANGED <<resp_msgs, key_vars, client_vars>>
+            ELSE
+              /\ UNCHANGED <<vars>>
+      \/ /\ resp.type = "lock_failed"
+         /\ resp.start_ts = client_ts[c].start_ts
+         /\ resp.latest_commit_ts > client_ts[c].for_update_ts
+         /\ client_ts' = [client_ts EXCEPT ![c].for_update_ts = resp.latest_commit_ts]
+         /\ SendReqs({[type |-> "lock_key",
+                       start_ts |-> client_ts'[c].start_ts,
+                       primary |-> CLIENT_PRIMARY[c],
+                       key |-> resp.key,
+                       for_update_ts |-> client_ts'[c].for_update_ts]})
+         /\ UNCHANGED <<resp_msgs, key_vars, client_key, client_state, next_ts>>
       
 ClientPrewritePessimistic(c) ==
   /\ client_state[c] = "locking"
@@ -256,9 +261,8 @@ ClientPrewritePessimistic(c) ==
                 key |-> k] : k \in CLIENT_KEY[c]})
   /\ UNCHANGED <<resp_msgs, key_vars, client_ts, next_ts>>
 
-\* Add a function like `ClientRetryReadKey` (?)
-ClientCheckTxnStatus(c) ==
-  /\ client_state = "reading"
+ClientReadFailedCheckTxnStatus(c) ==
+  /\ client_state[c] \in {"reading"}
   /\ \E resp \in resp_msgs :
     /\ resp.type = "get_resp"
     /\ resp.met_optimistic_lock = TRUE
@@ -304,10 +308,13 @@ ClientCommit(c) ==
 \* Server Actions
 
 \* Write the write column and unlock the lock iff the lock exists.
+unlock_key(k) ==
+  /\ key_lock' = [key_lock EXCEPT ![k] = {}]
+
 commit(pk, start_ts, commit_ts) ==
   \E l \in key_lock[pk] :
     /\ l.ts = start_ts
-    /\ key_lock' = [key_lock EXCEPT ![pk] = {}]
+    /\ unlock_key(pk)
     /\ key_write' = [key_write EXCEPT ![pk] = @ \union {[ts |-> commit_ts,
                                                          type |-> "write",
                                                          start_ts |-> start_ts]}]
@@ -328,11 +335,10 @@ rollback(k, start_ts) ==
   IN
     \* If a lock exists and has the same ts, unlock it.
     /\ IF \E l \in key_lock[k] : l.ts = start_ts
-       THEN key_lock' = [key_lock EXCEPT ![k] = {}]
+       THEN unlock_key(k)
        ELSE UNCHANGED key_lock
     /\ key_data' = [key_data EXCEPT ![k] = @ \ {start_ts}]
-    /\ IF 
-          /\ ~ \E w \in key_write[k]: w.ts = start_ts
+    /\ IF ~ \E w \in key_write[k]: w.ts = start_ts
        THEN
             key_write' = [key_write EXCEPT
               ![k] = 
@@ -354,43 +360,64 @@ ServerLockKey ==
         start_ts == req.start_ts
        IN
         \* Pessimistic lock is allowed only if no stale lock exists.  If
-        \* there is one, wait until ServerCleanupStaleLock to clean it up.
-        /\ key_lock[k] = {}
-        /\ LET
-              latest_write == {w \in key_write[k] : \A w2 \in key_write[k] : w.ts >= w2.ts}
-              
-              all_commits == {w \in key_write[k] : w.type = "write"}
-              latest_commit == {w \in all_commits : \A w2 \in all_commits : w.ts >= w2.ts}
-           IN
-              IF \E w \in key_write[k] : w.start_ts = start_ts /\ w.type = "rollback"
-              THEN
-                \* If corresponding rollback record is found, which
-                \* indicates that the transcation is rollbacked, abort the
-                \* transaction.
-                /\ SendResp([start_ts |-> start_ts, type |-> "lock_key_aborted"])
-                /\ UNCHANGED <<req_msgs, client_vars, key_vars, next_ts>>
-              ELSE
-                \* Acquire pessimistic lock only if for_update_ts of req
-                \* is greater or equal to the latest "write" record.
-                \* Because if the latest record is "write", it means that
-                \* a new version is committed after for_update_ts, which
-                \* violates Read Committed guarantee.
-                \/ /\ ~ \E w \in latest_commit : w.ts > req.for_update_ts
-                   /\ key_lock' = [key_lock EXCEPT ![k] = {[ts |-> start_ts,
-                                                            primary |-> req.primary,
-                                                            min_commit_ts |-> NoneTs,
-                                                            type |-> "lock_key"]}]
-                   /\ SendResp([start_ts |-> start_ts, type |-> "locked_key", key |-> k])
-                   /\ UNCHANGED <<req_msgs, client_vars, key_data, key_write, next_ts>>
-                \* Otherwise, reject the request and let client to retry
-                \* with new for_update_ts.
-                \/ \E w \in latest_commit :
-                    /\ w.ts > req.for_update_ts
-                    /\ SendResp([start_ts |-> start_ts,
-                                 type |-> "lock_failed",
-                                 key |-> k,
-                                 latest_commit_ts |-> w.ts])
-                    /\ UNCHANGED <<req_msgs, client_vars, key_vars, next_ts>>
+        \* there is one, wait until ClientCheckTxnStatus to clean it up.
+        IF key_lock[k] = {} THEN
+          /\ LET
+                latest_write == {w \in key_write[k] : \A w2 \in key_write[k] : w.ts >= w2.ts}
+                
+                all_commits == {w \in key_write[k] : w.type = "write"}
+                latest_commit == {w \in all_commits : \A w2 \in all_commits : w.ts >= w2.ts}
+                commit_read == {w \in all_commits : \A w2 \in all_commits : w2.ts <= w.ts \/ w2.ts >= start_ts}
+             IN
+                IF \E w \in key_write[k] : w.start_ts = start_ts /\ w.type = "rollback"
+                THEN
+                  \* If corresponding rollback record is found, which
+                  \* indicates that the transcation is rollbacked, abort the
+                  \* transaction.
+                  /\ SendResp([start_ts |-> start_ts, type |-> "lock_key_aborted"])
+                  /\ UNCHANGED <<req_msgs, client_vars, key_vars, next_ts>>
+                ELSE
+                  \* Acquire pessimistic lock only if for_update_ts of req
+                  \* is greater or equal to the latest "write" record.
+                  \* Because if the latest record is "write", it means that
+                  \* a new version is committed after for_update_ts, which
+                  \* violates Read Committed guarantee.
+                  \/ /\ ~ \E w \in latest_commit : w.ts > req.for_update_ts
+                     /\ key_lock' = [key_lock EXCEPT ![k] = {[ts |-> start_ts,
+                                                              primary |-> req.primary,
+                                                              min_commit_ts |-> NoneTs,
+                                                              type |-> "lock_key"]}]
+                    /\ IF ~ commit_read = {} 
+                        THEN
+                          \* Actually there's only one msg to be sent.
+                          /\ SendResps({[start_ts |-> start_ts, type |-> "locked_key", key |-> k, value_ts |-> w2.start_ts] :
+                                        w2 \in commit_read})
+                          /\ UNCHANGED <<req_msgs, client_vars, key_data, key_write, next_ts>>
+                        ELSE
+                          /\ SendResp([start_ts |-> start_ts, type |-> "locked_key", key |-> k, value_ts |-> NoneTs])
+                          /\ UNCHANGED <<req_msgs, client_vars, key_data, key_write, next_ts>>
+                  \* Otherwise, reject the request and let client to retry
+                  \* with new for_update_ts.
+                  \/ \E w \in latest_commit :
+                      /\ w.ts > req.for_update_ts
+                      /\ SendResp([start_ts |-> start_ts,
+                                  type |-> "lock_failed",
+                                  key |-> k,
+                                  latest_commit_ts |-> w.ts, 
+                                  lock_ts |-> NoneTs,
+                                  lock_type |-> "no_lock"])
+                      /\ UNCHANGED <<req_msgs, client_vars, key_vars, next_ts>>
+        ELSE IF \E l \in key_lock[k] : ~ l.ts = start_ts 
+        THEN
+          /\ SendResps({[start_ts |-> start_ts,
+                       type |-> "lock_failed",
+                       key |-> k,
+                       latest_commit_ts |-> NoneTs,
+                       lock_ts |-> l.ts,
+                       lock_type |-> l.type] : l \in key_lock[k]})
+          /\ UNCHANGED <<req_msgs, client_vars, key_vars, next_ts>>
+        ELSE
+          /\ UNCHANGED <<vars>>
 
 ServerReadKey ==
   \E req \in req_msgs :
@@ -414,19 +441,22 @@ ServerPrewritePessimistic ==
         k == req.key
         start_ts == req.start_ts
        IN
-        \* Pessimistic prewrite is allowed only if pressimistic lock is
-        \* acquired, otherwise abort the transaction.
+        \* Pessimistic prewrite is allowed if pressimistic lock is
+        \* acquired, or, there's no lock, and no write record whose 
+        \* commit_ts >= start_ts otherwise abort the transaction.
         /\ IF \E l \in key_lock[k] : l.ts = start_ts
+              \/ ~ \E w \in key_write[k] : w.ts >= start_ts
            THEN
-              /\ key_lock' = [key_lock EXCEPT ![k] = {[ts |-> start_ts,
+             /\ key_lock' = [key_lock EXCEPT ![k] = {[ts |-> start_ts,
                                                       primary |-> req.primary,
-                                                      type |-> "prewrite_pessimistic"]}]
-              /\ key_data' = [key_data EXCEPT ![k] = @ \union {start_ts}]
-              /\ SendResp([start_ts |-> start_ts, type |-> "prewrited", key |-> k])
-              /\ UNCHANGED <<req_msgs, client_vars, key_write, next_ts>>
+                                                      type |-> "prewrite_pessimistic",
+                                                      min_commit_ts |-> NoneTs]}]
+             /\ key_data' = [key_data EXCEPT ![k] = @ \union {start_ts}]
+             /\ SendResp([start_ts |-> start_ts, type |-> "prewrited", key |-> k])
+             /\ UNCHANGED <<req_msgs, client_vars, key_write, next_ts>>
            ELSE
-              /\ SendResp([start_ts |-> start_ts, type |-> "prewrite_aborted"])
-              /\ UNCHANGED <<req_msgs, client_vars, key_vars, next_ts>>
+             /\ SendResp([start_ts |-> start_ts, type |-> "prewrite_aborted"])
+             /\ UNCHANGED <<req_msgs, client_vars, key_vars, next_ts>>
 
 ServerPrewriteOptimistic ==
   \E req \in req_msgs :
@@ -441,7 +471,7 @@ ServerPrewriteOptimistic ==
               /\ UNCHANGED <<req_msgs, client_vars, key_vars, next_ts>>
            ELSE
               \* Optimistic prewrite is allowed only if no stale lock exists.  If
-              \* there is one, wait until ServerCleanupStaleLock to clean it up.
+              \* there is one, wait until ClientCheckTxnStatus to clean it up.
               /\ \/ key_lock[k] = {} 
                  \/ \E l \in key_lock[k] : l.ts = start_ts
               /\ key_lock' = [key_lock EXCEPT ![k] = {[ts |-> start_ts,
@@ -476,21 +506,6 @@ ServerCommit ==
             /\ SendResp([start_ts |-> start_ts, type |-> "commit_aborted"])
             /\ UNCHANGED <<req_msgs, client_vars, key_vars, next_ts>>
 
-\* In the spec, the primary key with a lock may clean up itself
-\* spontaneously.  There is no need to model a client to request clean up
-\* because there is no difference between a optimistic client trying to
-\* read a key that has lock timeouted and the key trying to unlock itself.
-ServerCleanupStaleLock ==
-  \E k \in KEY :
-    \E l \in key_lock[k] :
-      /\ SendReqs({[type |-> "check_txn_status",
-                    start_ts |-> l.ts,
-                    caller_start_ts |-> next_ts,
-                    primary |-> l.primary,
-                    resolving_pessimistic_lock |-> l.type = "lock_key"]})
-      /\ next_ts' = next_ts + 1
-      /\ UNCHANGED <<resp_msgs, client_vars, key_vars>>
-
 \* Clean up the stale transaction by checking the status of the primary key.
 \*
 \* In practice, the transaction will be rolled back if TTL on the lock is expired. But
@@ -524,11 +539,11 @@ ServerCheckTxnStatus ==
                 /\ lock.type = "lock_key"
                 /\ req.resolving_pessimistic_lock = TRUE
             THEN
-              /\ key_lock' = [key_lock EXCEPT ![pk] = {}]
-              /\ SendResp({[type |-> "check_txn_status_resp",
+              /\ unlock_key(pk)
+              /\ SendResp([type |-> "check_txn_status_resp",
                             start_ts |-> start_ts,
-                            action |-> "pessimistic_rollback"]})
-              /\ UNCHANGED <<msg_vars, key_data, key_write, client_vars, next_ts>>
+                            action |-> "pessimistic_rollbacked"])
+              /\ UNCHANGED <<req_msgs, key_data, key_write, client_vars, next_ts>>
             ELSE
               /\ rollback(pk, start_ts)
               /\ SendReqs({[type |-> "resolve_rollbacked",
@@ -561,9 +576,9 @@ ServerCheckTxnStatus ==
                             action |-> "committed"])
               /\ UNCHANGED <<client_vars, key_vars, next_ts>>
             ELSE IF req.resolving_pessimistic_lock = TRUE THEN
-              /\ SendResp({[type |-> "check_txn_status_resp",
+              /\ SendResp([type |-> "check_txn_status_resp",
                             start_ts |-> start_ts,
-                            action |-> "lock_not_exist_do_nothing"]})
+                            action |-> "lock_not_exist_do_nothing"])
               /\ UNCHANGED <<req_msgs, client_vars, key_vars, next_ts>>
             ELSE
               /\ rollback(pk, start_ts)
@@ -620,6 +635,7 @@ Init ==
 Next ==
   \/ \E c \in OPTIMISTIC_CLIENT :
         \/ ClientReadKey(c)
+        \/ ClientReadFailedCheckTxnStatus(c)
         \/ ClientPrewriteOptimistic(c)
         \/ ClientPrewrited(c)
         \/ ClientCommit(c)
@@ -635,7 +651,6 @@ Next ==
   \/ ServerPrewritePessimistic
   \/ ServerPrewriteOptimistic
   \/ ServerCommit
-  \/ ServerCleanupStaleLock
   \/ ServerCheckTxnStatus
   \/ ServerResolveCommitted
   \/ ServerResolveRollbacked
@@ -726,6 +741,26 @@ MsgTsConsistency ==
           req.commit_ts <= next_ts
   /\ \A resp \in resp_msgs : resp.start_ts <= next_ts
 
+ReadSnapshotIsolation ==
+  /\ \A resp \in resp_msgs :
+      /\ resp.type = "get_resp"
+      /\ LET
+           start_ts == resp.start_ts
+           key == resp.key
+           \* As mentioned before, the value is just a timestamp
+           value == resp.value
+           met_optimistic_lock == resp.met_optimistic_lock
+         IN
+         /\ \E c \in CLIENT:
+           /\ client_ts[c].start_ts = start_ts
+           /\ IF client_ts[c].commit_ts \in Ts THEN
+                /\ \A w \in key_write[key] :
+                  \/ w.type = "rollback"
+                  \/ w.start_ts > start_ts
+                  \/ w.ts < start_ts 
+              ELSE
+                /\ TRUE
+
 \* SnapshotIsolation is implied from the following assumptions (but is not
 \* necessary) because SnapshotIsolation means that: 
 \*  (1) Once a transaction is committed, all keys of the transaction should
@@ -739,11 +774,13 @@ MsgTsConsistency ==
 \*    PROOF BY NextTsConsistency, MsgTsConsistency
 \*  (3) All aborted transactions would be always not readable.
 \*    PROOF BY AbortConsistency, MsgMonotonicity
+\* TODO: Explain the ReadSnapshotIsolation
 SnapshotIsolation == /\ CommitConsistency
                      /\ AbortConsistency
                      /\ NextTsMonotonicity
                      /\ MsgMonotonicity
                      /\ MsgTsConsistency
+                     /\ ReadSnapshotIsolation
 -----------------------------------------------------------------------------
 THEOREM Safety ==
   Spec => [](/\ TypeOK
