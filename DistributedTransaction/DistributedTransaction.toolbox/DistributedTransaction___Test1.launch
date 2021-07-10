@@ -7,12 +7,12 @@
     <intAttribute key="dfidDepth" value="100"/>
     <booleanAttribute key="dfidMode" value="false"/>
     <intAttribute key="distributedFPSetCount" value="0"/>
-    <stringAttribute key="distributedNetworkInterface" value="192.168.224.64"/>
+    <stringAttribute key="distributedNetworkInterface" value="172.17.0.1"/>
     <intAttribute key="distributedNodesCount" value="1"/>
     <stringAttribute key="distributedTLC" value="off"/>
     <stringAttribute key="distributedTLCVMArgs" value=""/>
     <intAttribute key="fpBits" value="1"/>
-    <intAttribute key="fpIndex" value="41"/>
+    <intAttribute key="fpIndex" value="129"/>
     <booleanAttribute key="fpIndexRandom" value="true"/>
     <intAttribute key="maxHeapSize" value="40"/>
     <intAttribute key="maxSetSize" value="1000000"/>
@@ -21,7 +21,7 @@
     <stringAttribute key="modelBehaviorNext" value=""/>
     <stringAttribute key="modelBehaviorSpec" value="Spec"/>
     <intAttribute key="modelBehaviorSpecType" value="1"/>
-    <stringAttribute key="modelBehaviorVars" value="key_data, key_lock, next_ts, req_msgs, client_state, client_key, client_ts, resp_msgs, key_write"/>
+    <stringAttribute key="modelBehaviorVars" value="key_data, client_key_read_times, key_lock, next_ts, req_msgs, client_state, client_key, client_ts, resp_msgs, key_write"/>
     <stringAttribute key="modelComments" value=""/>
     <booleanAttribute key="modelCorrectnessCheckDeadlock" value="false"/>
     <listAttribute key="modelCorrectnessInvariants">
@@ -46,9 +46,10 @@
         <listEntry value="PESSIMISTIC_CLIENT;;{c1, c2};1;0"/>
         <listEntry value="OPTIMISTIC_CLIENT;;{c3};1;0"/>
         <listEntry value="CLIENT_PRIMARY;;c1 :&gt; k1 @@ c2 :&gt; k1 @@ c3 :&gt; k2;0;0"/>
+        <listEntry value="MAX_CLIENT_READ_TIMES;;3;0;0"/>
     </listAttribute>
     <intAttribute key="modelVersion" value="20191005"/>
-    <intAttribute key="numberOfWorkers" value="6"/>
+    <intAttribute key="numberOfWorkers" value="4"/>
     <booleanAttribute key="recover" value="false"/>
     <stringAttribute key="result.mail.address" value=""/>
     <intAttribute key="simuAril" value="-1"/>
