@@ -12,7 +12,7 @@
     <stringAttribute key="distributedTLC" value="off"/>
     <stringAttribute key="distributedTLCVMArgs" value=""/>
     <intAttribute key="fpBits" value="1"/>
-    <intAttribute key="fpIndex" value="129"/>
+    <intAttribute key="fpIndex" value="94"/>
     <booleanAttribute key="fpIndexRandom" value="true"/>
     <intAttribute key="maxHeapSize" value="40"/>
     <intAttribute key="maxSetSize" value="1000000"/>
@@ -21,7 +21,7 @@
     <stringAttribute key="modelBehaviorNext" value=""/>
     <stringAttribute key="modelBehaviorSpec" value="Spec"/>
     <intAttribute key="modelBehaviorSpecType" value="1"/>
-    <stringAttribute key="modelBehaviorVars" value="key_data, client_key_read_times, key_lock, next_ts, req_msgs, client_state, client_key, client_ts, resp_msgs, key_write"/>
+    <stringAttribute key="modelBehaviorVars" value="key_data, client_key_read_times, key_lock, next_ts, req_msgs, client_state, client_key, client_ts, resp_msgs, client_check_txn_times, key_write"/>
     <stringAttribute key="modelComments" value=""/>
     <booleanAttribute key="modelCorrectnessCheckDeadlock" value="false"/>
     <listAttribute key="modelCorrectnessInvariants">
@@ -47,6 +47,7 @@
         <listEntry value="OPTIMISTIC_CLIENT;;{c3};1;0"/>
         <listEntry value="CLIENT_PRIMARY;;c1 :&gt; k1 @@ c2 :&gt; k1 @@ c3 :&gt; k2;0;0"/>
         <listEntry value="MAX_CLIENT_READ_TIMES;;3;0;0"/>
+        <listEntry value="MAX_CLIENT_CHECK_TXN_TIMES;;2;0;0"/>
     </listAttribute>
     <intAttribute key="modelVersion" value="20191005"/>
     <intAttribute key="numberOfWorkers" value="4"/>
@@ -57,6 +58,9 @@
     <intAttribute key="simuSeed" value="-1"/>
     <stringAttribute key="specName" value="DistributedTransaction"/>
     <stringAttribute key="tlcResourcesProfile" value="local nomal"/>
+    <listAttribute key="traceExploreExpressions">
+        <listEntry value="1req_msgs"/>
+    </listAttribute>
     <stringAttribute key="view" value=""/>
     <booleanAttribute key="visualizeStateGraph" value="false"/>
 </launchConfiguration>

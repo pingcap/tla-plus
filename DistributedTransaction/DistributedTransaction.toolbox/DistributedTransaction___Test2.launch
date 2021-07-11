@@ -35,6 +35,7 @@
         <listEntry value="OPTIMISTIC_CLIENT;;{c3};1;0"/>
         <listEntry value="CLIENT_PRIMARY;;c1 :&gt; k1 @@ c2 :&gt; k1 @@ c3 :&gt; k3;0;0"/>
         <listEntry value="MAX_CLIENT_READ_TIMES;;3;0;0"/>
+        <listEntry value="MAX_CLIENT_CHECK_TXN_TIMES;;2;0;0"/>
     </listAttribute>
     <intAttribute key="modelVersion" value="20191005"/>
     <intAttribute key="numberOfWorkers" value="6"/>
