@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<launchConfiguration type="org.lamport.tla.toolbox.tool.tlc.modelCheck">
+    <stringAttribute key="TLCCmdLineParameters" value=""/>
+    <intAttribute key="collectCoverage" value="1"/>
+    <stringAttribute key="configurationName" value="Test2"/>
+    <booleanAttribute key="deferLiveness" value="false"/>
+    <intAttribute key="dfidDepth" value="100"/>
+    <booleanAttribute key="dfidMode" value="false"/>
+    <intAttribute key="distributedFPSetCount" value="0"/>
+    <stringAttribute key="distributedNetworkInterface" value="10.33.72.47"/>
+    <intAttribute key="distributedNodesCount" value="1"/>
+    <stringAttribute key="distributedTLC" value="off"/>
+    <stringAttribute key="distributedTLCVMArgs" value=""/>
+    <intAttribute key="fpBits" value="1"/>
+    <intAttribute key="fpIndex" value="0"/>
+    <booleanAttribute key="fpIndexRandom" value="true"/>
+    <intAttribute key="maxHeapSize" value="45"/>
+    <intAttribute key="maxSetSize" value="1000000"/>
+    <booleanAttribute key="mcMode" value="false"/>
+    <stringAttribute key="modelBehaviorInit" value=""/>
+    <stringAttribute key="modelBehaviorNext" value=""/>
+    <stringAttribute key="modelBehaviorSpec" value="Spec"/>
+    <intAttribute key="modelBehaviorSpecType" value="1"/>
+    <stringAttribute key="modelBehaviorVars" value="key_data, key_lock, next_ts, req_msgs, client_state, client_key, client_ts, resp_msgs, key_write"/>
+    <stringAttribute key="modelComments" value=""/>
+    <booleanAttribute key="modelCorrectnessCheckDeadlock" value="false"/>
+    <listAttribute key="modelCorrectnessInvariants">
+        <listEntry value="1TypeOK"/>
+        <listEntry value="1UniqueCommitOrAbort"/>
+        <listEntry value="1CommitConsistency"/>
+        <listEntry value="1AbortConsistency"/>
+        <listEntry value="1WriteConsistency"/>
+        <listEntry value="1UniqueLockOrWrite"/>
+        <listEntry value="1UniqueWrite"/>
+        <listEntry value="1MsgTsConsistency"/>
+        <listEntry value="1Cardinality(resp_msgs) &lt; 28"/>
+        <listEntry value="1ReadSnapshotIsolation"/>
+    </listAttribute>
+    <listAttribute key="modelCorrectnessProperties"/>
+    <intAttribute key="modelEditorOpenTabs" value="8"/>
+    <stringAttribute key="modelExpressionEval" value=""/>
+    <listAttribute key="modelParameterConstants">
+        <listEntry value="KEY;;{k1, k2, k3};1;0"/>
+        <listEntry value="PESSIMISTIC_CLIENT;;{c1, c2};1;0"/>
+        <listEntry value="OPTIMISTIC_CLIENT;;{c3};1;0"/>
+        <listEntry value="CLIENT_PRIMARY;;c1 :&gt; k1 @@ c2 :&gt; k1 @@ c3 :&gt; k3;0;0"/>
+        <listEntry value="CLIENT_WRITE_KEY;;c1 :&gt; {k1, k2, k3} @@ c2 :&gt; {k1, k2} @@ c3 :&gt; {k1, k3};0;0"/>
+        <listEntry value="CLIENT_READ_KEY;;c1 :&gt; {} @@ c2 :&gt; {} @@ c3 :&gt; {k1, k3};0;0"/>
+    </listAttribute>
+    <intAttribute key="modelVersion" value="20191005"/>
+    <intAttribute key="numberOfWorkers" value="7"/>
+    <booleanAttribute key="recover" value="false"/>
+    <stringAttribute key="result.mail.address" value=""/>
+    <intAttribute key="simuAril" value="-1"/>
+    <intAttribute key="simuDepth" value="100"/>
+    <intAttribute key="simuSeed" value="-1"/>
+    <stringAttribute key="specName" value="DistributedTransaction"/>
+    <stringAttribute key="tlcResourcesProfile" value="local custom"/>
+    <stringAttribute key="view" value=""/>
+    <booleanAttribute key="visualizeStateGraph" value="false"/>
+</launchConfiguration>
