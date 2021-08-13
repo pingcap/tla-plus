@@ -12,7 +12,7 @@
     <stringAttribute key="distributedTLC" value="off"/>
     <stringAttribute key="distributedTLCVMArgs" value=""/>
     <intAttribute key="fpBits" value="1"/>
-    <intAttribute key="fpIndex" value="115"/>
+    <intAttribute key="fpIndex" value="117"/>
     <booleanAttribute key="fpIndexRandom" value="true"/>
     <intAttribute key="maxHeapSize" value="45"/>
     <intAttribute key="maxSetSize" value="1000000"/>
@@ -33,8 +33,6 @@
         <listEntry value="1UniqueLockOrWrite"/>
         <listEntry value="1UniqueWrite"/>
         <listEntry value="1MsgTsConsistency"/>
-        <listEntry value="0Cardinality(resp_msgs) &lt; 25"/>
-        <listEntry value="0\/ /\ ~ \E req \in req_msgs : req.type = &quot;lock_key&quot; /\ req.start_ts = 1&#13;&#10;\/ ~ \E resp \in resp_msgs : resp.type = &quot;locked_key&quot; /\ resp.start_ts = 1&#13;&#10;\/ ~ \E req1 \in req_msgs : req1.type = &quot;commit&quot; /\ req1.start_ts = 1 /\ req1.commit_ts = 2&#13;&#10;\/ ~ \E req2 \in req_msgs : req2.type = &quot;get&quot; /\ req2.start_ts = 3&#13;&#10;\/ ~ \E resp1 \in resp_msgs : resp1.type = &quot;get_resp&quot; /\ resp1.value_ts = NoneTs&#13;&#10;\/ ~ \E resp2 \in resp_msgs : resp2.type = &quot;committed&quot;"/>
         <listEntry value="1ReadSnapshotIsolation"/>
     </listAttribute>
     <listAttribute key="modelCorrectnessProperties"/>
