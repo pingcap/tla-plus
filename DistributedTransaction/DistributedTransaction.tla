@@ -489,11 +489,9 @@ ServerPrewritePessimistic ==
         k == req.key
         start_ts == req.start_ts
        IN
-        \* Pessimistic prewrite is allowed if pressimistic lock is
+        \* Pessimistic prewrite is only allowed if pressimistic lock is
         \* acquired, or, there's no lock, and no write record whose
-         \* acquired, or, there's no lock, and no write record whose
-        \* acquired, or, there's no lock, and no write record whose
-        \* commit_ts >= start_ts, otherwise abort the transaction.
+        \* commit_ts >= start_ts otherwise abort the transaction.
         IF
           \/ /\ ~ \E w \in key_write[k] : w.ts >= start_ts
              /\ key_lock[k] = {}
