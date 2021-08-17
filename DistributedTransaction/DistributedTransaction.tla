@@ -470,6 +470,15 @@ ServerReadKey ==
            k == req.key
            start_ts == req.start_ts
          IN
+           \* If the lock belongs to the transaction sending the request, or
+           \* if it's a pessimistic lock, return read success.
+           \*
+           \* The reason why pessimistic lock will not block the read is that
+           \* the owner transaction of the pessimistic lock is impossible to
+           \* commit the key with a commit_ts smaller than req.start_ts because
+           \* the owner transaction must get commit_ts after all prewrites have
+           \* completed which is apperently not done since the lock type is
+           \* not a prewrite lock.
            /\ IF \/ key_lock[k] = {}
                  \/ \E l \in key_lock[k]: l.type = "lock_key" \/ l.start_ts = start_ts
               THEN
