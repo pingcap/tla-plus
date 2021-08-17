@@ -133,11 +133,12 @@ ReqMessages ==
            resolving_pessimistic_lock : BOOLEAN]
 
 \* The RespMessages defined here is only a subset of the "actual" one in spec. Other resp messages are
-\* transmitted(passed) by function arguments. By doing so, we cannot check the retransmission or
-\* delay(we do can check the message lost) of these messages. The reason for this is that messages
-\* like "lock_key_failed_has_lock" "lock_key_failed_write_conflict" are just too much, which makes the
-\* model checking impossible to finish. Considering the delay or retransmit of them is not that serious
-\* to the transaction safety, we made the decision to reduce final "distinct state number".
+\* transmitted(passed) directly to the client by function arguments, defined in DirectRespMessages. By
+\* doing so, we cannot simuliate delay and re-transmition but only message losing. The reason why it works
+\* is that the response will not be delay and re-transmition in acutal gRPC implementation.
+\*
+\* The messages defined in RespMessages is used to record the history, in order to check the invariants.
+\* (e.g. TiKV server should never has responded a transcation committed while has responded the transaction rollbacked)
 RespMessages ==
           [start_ts : Ts, type : {"read_success"}, key : KEY, value_ts : Ts \union {NoneTs}]
   \union  [start_ts : Ts, type : {"committed",
@@ -617,17 +618,17 @@ check_txn_status_missing_lock(start_ts, pk, resolving_pessimistic_lock) ==
 
 \* Clean up the stale transaction by checking the status of the primary key.
 \*
-\* In practice, the transaction will be rolled back if TTL on the lock is expired. But
-\* because it is hard to model the TTL in TLA+ spec, the TTL is considered constantly
-\* expired when the action is taken.
+\* In practice, the transaction will be rolled back only if TTL on the lock is expired. But
+\* because it is hard to model the TTL in TLA+ spec, the TTL is considered constantly expired
+\* when ServerCheckTxnStatus is called.
 \*
-\* Moreover, TiKV will send a response for `TxnStatus` to the client, and then depending
-\* on the `TxnStatus`, the client will send `resolve_rollback` or `resolve_commit` to the
-\* secondary keys to clean up stale locks. In the TLA+ spec, the response to `check_txn_status`
-\* is omitted and TiKV will directly send `resolve_rollback` or `resolve_commit` message to
-\* secondary keys, because the action of client sending resolve message by proxying the
-\* `TxnStatus` from TiKV does not change the state of the client, therefore is equal to directly
-\* sending resolve message by TiKV
+\* Moreover, TiKV will send a response `TxnStatus` to the client, and depending on the `TxnStatus`
+\* the client will send `resolve_rollback` or `resolve_commit` to the secondary keys to clean up
+\* stale locks on secondary keys. In the TLA+ spec, ServerCheckTxnStatus will not respond to the
+\* client and instead TiKV will directly send `resolve_rollback` or `resolve_commit` message to
+\* the server where the secondary keys are on, because the action of client sending resolve message
+\* by proxying the `TxnStatus` from TiKV to other TiKV does not change the state of the client,
+\* therefore is equal to directly sending resolve message from TiKV to TiKV directly.
 ServerCheckTxnStatus ==
   \E req \in req_msgs :
     /\ req.type = "check_txn_status"
@@ -736,7 +737,7 @@ CommitConsistency ==
             (~ \E l \in key_lock[k] : l.start_ts = resp.start_ts) =
               keyCommitted(k, resp.start_ts)
 
-\* If a transaction is aborted, all key of that transaction must be not
+\* If a transaction is aborted, all key of that transaction must not be
 \* committed.
 AbortConsistency ==
   \A resp \in resp_msgs :
