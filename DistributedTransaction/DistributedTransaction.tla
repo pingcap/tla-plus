@@ -15,6 +15,7 @@ CLIENT_KEY == [c \in CLIENT |-> CLIENT_READ_KEY[c] \union CLIENT_WRITE_KEY[c]]
 CONSTANTS CLIENT_PRIMARY
 
 \* Pessimistic clients can't read a key without writing it and commit it,
+\* and pessimistic client read the keys while acquiring pessimistic locks
 \* so the CLIENT_READ_KEY for pessimistic clients should be empty.
 ASSUME \A c \in PESSIMISTIC_CLIENT: CLIENT_READ_KEY[c] = {}
 
@@ -77,12 +78,13 @@ VARIABLES client_state
 \* client_ts[c] is a record of [start_ts, commit_ts, for_update_ts, min_commit_ts].
 \* Fields are all initialized to NoneTs.
 VARIABLES client_ts
-\* client_key[c] is a record of [locking: {key}, prewriting: {key}].
-\* Hereby, "locking" denotes the keys whose pessimistic locks
-\* haven't been acquired, "prewriting" denotes the keys that are pending
-\* for prewrite.
+\* client_key[c] is a record of [reading: {key}, locking: {key}, prewriting: {key}].
+\* Hereby, "reading" denotes the keys that the optimistic client is reading,
+\* "locking" denotes the keys that the pessimistic client is acquiring for pessimistic
+\* locks, and "prewriting" denotes the keys that are waiting for prewrite success.
 VARIABLES client_key
-
+\* client_read[c][k] stores the value that the client has read from server (by optimsitic
+\* read or pessimistic lock key). This is used for checking snapshot isolation.
 VARIABLES client_read
 
 \* next_ts is a globally monotonically increasing integer, representing
