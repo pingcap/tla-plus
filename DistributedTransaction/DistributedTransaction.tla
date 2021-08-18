@@ -73,8 +73,8 @@ VARIABLES key_lock
 \* rollback record would not be collapsed.
 VARIABLES key_write
 
-\* client_state[c] indicates the current transaction stage of client c.
-VARIABLES client_state
+\* client_stage[c] indicates the current transaction stage of client c.
+VARIABLES client_stage
 \* client_ts[c] is a record of [start_ts, commit_ts, for_update_ts, min_commit_ts].
 \* Fields are all initialized to NoneTs.
 VARIABLES client_ts
@@ -83,8 +83,9 @@ VARIABLES client_ts
 \* "locking" denotes the keys that the pessimistic client is acquiring for pessimistic
 \* locks, and "prewriting" denotes the keys that are waiting for prewrite success.
 VARIABLES client_key
-\* client_read[c][k] stores the value that the client has read from server (by optimsitic
-\* read or pessimistic lock key). This is used for checking snapshot isolation.
+\* client_read[c][k] stores the value that the client has read from server for
+\* key `k` (by optimsitic read or pessimistic lock key). This is used for checking
+\* snapshot isolation.
 VARIABLES client_read
 
 \* next_ts is a globally monotonically increasing integer, representing
@@ -93,7 +94,7 @@ VARIABLES client_read
 VARIABLES next_ts
 
 msg_vars == <<req_msgs, resp_msgs>>
-client_vars == <<client_state, client_ts, client_key, client_read>>
+client_vars == <<client_stage, client_ts, client_key, client_read>>
 key_vars == <<key_data, key_lock, key_write>>
 vars == <<msg_vars, client_vars, key_vars, next_ts>>
 
@@ -111,6 +112,7 @@ NoneTs == 0
 \* Represents the data version read from TiKV. NoneTs means that the value is empty.
 ValueTs == Ts \union {NoneTs}
 
+\* The messages that sent from client to the server.
 ReqMessages ==
           [start_ts : Ts, primary : KEY, type : {"lock_key"}, key : KEY,
             for_update_ts : Ts]
@@ -140,18 +142,24 @@ ReqMessages ==
   \union  [start_ts : Ts, caller_start_ts : Ts \union {NoneTs}, primary : KEY, type : {"check_txn_status"},
            resolving_pessimistic_lock : BOOLEAN]
 
-\* The RespMessages defined here is only a subset of the "actual" one in spec. Other resp messages are
-\* transmitted directly to the client by function arguments, defined in DirectRespMessages. By
-\* doing so, we cannot simuliate delay and re-transmition but only message losing. The reason why it works
-\* is that the response will not be delay and re-transmition in acutal gRPC implementation.
+\* In this spec, the responses from the server to the client are modeled differently from the requests.
+\* A response is modeled as a direct call to client handling function which makes the client states and
+\* the server states change in atomic.
 \*
-\* The messages defined in RespMessages is used to record the history, in order to check the invariants.
-\* (e.g. TiKV server should never has responded a transcation committed while has responded the transaction rollbacked)
-RespMessages == [start_ts : Ts, type : {"committed",
-                                        "commit_aborted",
-                                        "lock_key_aborted",
-                                        "prewrite_aborted"}]
-
+\* This is ok because, different from requests, which may be duplicated, delayed, or lost, the response
+\* can only be lost or delayed. Every client handling function will have a branch that the response
+\* is simply ignored, in order to simulate losing the response. Still, we can not simulate the delaying
+\* situation, but the client should (we thing) be ok with the delayed response since the client only
+\* handles the response at the matching stage (e.g. "reading", "locking", "prewriting"), and every
+\* client handling function only changes the client state to one key and leaving the state to other keys
+\* untouched, which makes the order of receiving the response to different keys is irrelevant.
+\*
+\* One more draw back is that, a resent request may call the client handling function, which is impossible
+\* in real-world because the client must drop the previous connection before retry, in other words, the
+\* client is only possible to recieve and handle the response to the request it last sent. We overcome this
+\* by checking whether the client is in the right stage to haneld the response. But still, the model will face
+\* to some response to the resent resquest for the same client stage. However, the model has just tested
+\* more but no less cases comparing to the real-world, and is still passing the check.
 DirectRespMessages ==
           [start_ts : Ts, type : {"read_optimistic_succeed"}, key : KEY, value_ts : ValueTs]
   \union  [start_ts : Ts, type : {"lock_key_succeed"}, key : KEY, for_update_ts : Ts, value_ts : ValueTs]
@@ -160,6 +168,15 @@ DirectRespMessages ==
   \union  [start_ts : Ts, type : {"lock_key_failed_write_conflict"}, key : KEY, latest_commit_ts : Ts]
   \union  [start_ts : Ts, type : {"prewrited"}, key : KEY]
   \union  [start_ts : Ts, type : {"commit_ts_expired"}, min_commit_ts : Ts]
+
+\* The responses defined in RespMessages will not be handled by the client in this spec, because they all
+\* drive the transaction the an end. The messages defined here are used to record the history, in order to
+\* check the invariants later defined in the spec (e.g. TiKV server should never has responded a transcation
+\* committed while it has also responded the transaction aborted).
+RespMessages == [start_ts : Ts, type : {"committed",
+                                        "commit_aborted",
+                                        "lock_key_aborted",
+                                        "prewrite_aborted"}]
 
 TypeOK == /\ req_msgs \in SUBSET ReqMessages
           /\ resp_msgs \in SUBSET RespMessages
@@ -178,7 +195,7 @@ TypeOK == /\ req_msgs \in SUBSET ReqMessages
               \union  [ts : Ts, start_ts : Ts, type : {"rollback"}, protected : BOOLEAN])]
           \* At most one lock in key_lock[k]
           /\ \A k \in KEY: Cardinality(key_lock[k]) <= 1
-          /\ client_state \in [CLIENT -> {"init", "reading", "locking", "prewriting", "committing"}]
+          /\ client_stage \in [CLIENT -> {"init", "reading", "locking", "prewriting", "committing"}]
           /\ client_ts \in [CLIENT -> [start_ts : Ts \union {NoneTs},
                                        commit_ts : Ts \union {NoneTs},
                                        for_update_ts : Ts \union {NoneTs}]]
@@ -193,8 +210,8 @@ TypeOK == /\ req_msgs \in SUBSET ReqMessages
 
 \* Once the get request is sent, it exist permanently in the req_msgs.
 ClientReadOptimistic(c) ==
-  /\ client_state[c] = "init"
-  /\ client_state' = [client_state EXCEPT ![c] = "reading"]
+  /\ client_stage[c] = "init"
+  /\ client_stage' = [client_stage EXCEPT ![c] = "reading"]
   /\ client_ts' = [client_ts EXCEPT ![c].start_ts = next_ts]
   /\ client_key' = [client_key EXCEPT ![c].reading = CLIENT_READ_KEY[c]]
   /\ next_ts' = next_ts + 1
@@ -212,11 +229,11 @@ ClientReadOptimisticSucceed(resp) ==
   /\ \/ UNCHANGED <<req_msgs, client_vars, next_ts>>
      \/ \E c \in CLIENT:
           /\ client_ts[c].start_ts = resp.start_ts
-          /\ client_state[c] = "reading"
+          /\ client_stage[c] = "reading"
           /\ resp.key \in client_key[c].reading
           /\ client_key' = [client_key EXCEPT ![c].reading = @ \ {resp.key}]
           /\ add_client_read_history(c, resp.key, resp.value_ts)
-          /\ UNCHANGED <<req_msgs, client_ts, client_state, next_ts>>
+          /\ UNCHANGED <<req_msgs, client_ts, client_stage, next_ts>>
 
 ClientReadOptimisticFailedHasLock(resp) ==
   /\ Assert(resp.type = "read_optimistic_failed_has_lock", "Message Type Error")
@@ -233,8 +250,8 @@ ClientReadOptimisticFailedHasLock(resp) ==
           /\ UNCHANGED <<client_vars, next_ts>>
 
 ClientLockKey(c) ==
-  /\ client_state[c] = "init"
-  /\ client_state' = [client_state EXCEPT ![c] = "locking"]
+  /\ client_stage[c] = "init"
+  /\ client_stage' = [client_stage EXCEPT ![c] = "locking"]
   /\ client_ts' = [client_ts EXCEPT ![c].start_ts = next_ts, ![c].for_update_ts = next_ts]
   /\ client_key' = [client_key EXCEPT ![c].locking = CLIENT_WRITE_KEY[c]]
   /\ next_ts' = next_ts + 1
@@ -256,18 +273,18 @@ ClientLockKeySucceed(resp) ==
           \* may carry a bad value that breaks the snapshot isolation. This
           \* guarantee holds because the previous gRPC connection must have closed.
           /\ client_ts[c].for_update_ts = resp.for_update_ts
-          /\ client_state[c] = "locking"
+          /\ client_stage[c] = "locking"
           /\ resp.key \in client_key[c].locking
           /\ client_key' = [client_key EXCEPT ![c].locking = @ \ {resp.key}]
           /\ add_client_read_history(c, resp.key, resp.value_ts)
-          /\ UNCHANGED <<req_msgs, client_ts, client_state, next_ts>>
+          /\ UNCHANGED <<req_msgs, client_ts, client_stage, next_ts>>
 
 ClientLockKeyFailedHasLock(resp) ==
   /\ Assert(resp.type = "lock_key_failed_has_lock", "Message Type Error")
   /\ \/ UNCHANGED <<req_msgs, client_vars, next_ts>>
      \/ \E c \in CLIENT:
           /\ client_ts[c].start_ts = resp.start_ts
-          /\ client_state[c] = "locking"
+          /\ client_stage[c] = "locking"
           /\ resp.key \in client_key[c].locking
           /\ SendReqs({[type |-> "check_txn_status",
                         start_ts |-> resp.lock_ts,
@@ -281,7 +298,7 @@ ClientLockKeyFailedWriteConflict(resp) ==
   /\ \/ UNCHANGED <<req_msgs, client_vars, next_ts>>
      \/ \E c \in CLIENT:
           /\ client_ts[c].start_ts = resp.start_ts
-          /\ client_state[c] = "locking"
+          /\ client_stage[c] = "locking"
           /\ resp.key \in client_key[c].locking
           /\ resp.latest_commit_ts > client_ts[c].for_update_ts
           /\ client_ts' = [client_ts EXCEPT ![c].for_update_ts = next_ts]
@@ -291,12 +308,12 @@ ClientLockKeyFailedWriteConflict(resp) ==
                         primary |-> CLIENT_PRIMARY[c],
                         key |-> resp.key,
                         for_update_ts |-> client_ts'[c].for_update_ts]})
-          /\ UNCHANGED <<client_state, client_key, client_read>>
+          /\ UNCHANGED <<client_stage, client_key, client_read>>
 
 ClientPrewriteOptimistic(c) ==
-  /\ client_state[c] = "reading"
+  /\ client_stage[c] = "reading"
   /\ client_key[c].reading = {}
-  /\ client_state' = [client_state EXCEPT ![c] = "prewriting"]
+  /\ client_stage' = [client_stage EXCEPT ![c] = "prewriting"]
   /\ client_key' = [client_key EXCEPT ![c].prewriting = CLIENT_WRITE_KEY[c]]
   /\ SendReqs({[type |-> "prewrite_optimistic",
                 start_ts |-> client_ts[c].start_ts,
@@ -305,9 +322,9 @@ ClientPrewriteOptimistic(c) ==
   /\ UNCHANGED <<resp_msgs, client_ts, client_read, key_vars, next_ts>>
 
 ClientPrewritePessimistic(c) ==
-  /\ client_state[c] = "locking"
+  /\ client_stage[c] = "locking"
   /\ client_key[c].locking = {}
-  /\ client_state' = [client_state EXCEPT ![c] = "prewriting"]
+  /\ client_stage' = [client_stage EXCEPT ![c] = "prewriting"]
   /\ client_key' = [client_key EXCEPT ![c].prewriting = CLIENT_WRITE_KEY[c]]
   /\ SendReqs({[type |-> "prewrite_pessimistic",
                 start_ts |-> client_ts[c].start_ts,
@@ -320,15 +337,15 @@ ClientPrewrited(resp) ==
   /\ \/ UNCHANGED <<req_msgs, client_vars, next_ts>>
      \/ \E c \in CLIENT:
           /\ client_ts[c].start_ts = resp.start_ts
-          /\ client_state[c] = "prewriting"
+          /\ client_stage[c] = "prewriting"
           /\ resp.key \in client_key[c].prewriting
           /\ client_key' = [client_key EXCEPT ![c].prewriting = @ \ {resp.key}]
-          /\ UNCHANGED <<req_msgs, client_ts, client_state, client_read, next_ts>>
+          /\ UNCHANGED <<req_msgs, client_ts, client_stage, client_read, next_ts>>
 
 ClientCommit(c) ==
-  /\ client_state[c] = "prewriting"
+  /\ client_stage[c] = "prewriting"
   /\ client_key[c].prewriting = {}
-  /\ client_state' = [client_state EXCEPT ![c] = "committing"]
+  /\ client_stage' = [client_stage EXCEPT ![c] = "committing"]
   /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = next_ts]
   /\ next_ts' = next_ts + 1
   /\ SendReqs({[type |-> "commit",
@@ -342,7 +359,7 @@ ClientRetryCommit(resp) ==
   /\ \/ UNCHANGED <<req_msgs, client_vars, next_ts>>
      \/ \E c \in CLIENT:
           /\ client_ts[c].start_ts = resp.start_ts
-          /\ client_state[c] = "commiting"
+          /\ client_stage[c] = "commiting"
           /\ client_ts[c].commit_ts < resp.min_commit_ts
           /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = next_ts]
           /\ next_ts' = next_ts + 1
@@ -350,7 +367,7 @@ ClientRetryCommit(resp) ==
                         start_ts |-> client_ts'[c].start_ts,
                         primary |-> CLIENT_PRIMARY[c],
                         commit_ts |-> client_ts'[c].commit_ts]})
-          /\ UNCHANGED <<client_state, client_key, client_read>>
+          /\ UNCHANGED <<client_stage, client_key, client_read>>
 -----------------------------------------------------------------------------
 \* Server Actions
 
@@ -732,7 +749,7 @@ Init ==
   /\ next_ts = 1
   /\ req_msgs = {}
   /\ resp_msgs = {}
-  /\ client_state = [c \in CLIENT |-> "init"]
+  /\ client_stage = [c \in CLIENT |-> "init"]
   /\ client_key = [c \in CLIENT |-> [reading |-> {}, locking |-> {}, prewriting |-> {}]]
   /\ client_ts = [c \in CLIENT |-> [start_ts |-> NoneTs,
                                     commit_ts |-> NoneTs,
