@@ -158,7 +158,7 @@ ReqMessages ==
 \* handling function, which is impossible in real-world because the client must drop the previous
 \* connection before retry, in other words, the client is only possible to recieve and to handle the
 \* response to the request it last sent. We overcome this by checking whether the client is in the right
-\* stage to haneld the response. But still, the model will face to some response to the resent resquest
+\* stage to handle the response. But still, the model will face to some response to the resent resquest
 \* for the same client stage. However, the model has just been tested against more but no less cases
 \* comparing to the real-world, and is still passing the check.
 DirectRespMessages ==
