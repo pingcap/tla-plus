@@ -21,10 +21,6 @@ ASSUME \A c \in PESSIMISTIC_CLIENT: CLIENT_READ_KEY[c] = {}
 ASSUME \A c \in CLIENT: CLIENT_KEY[c] \subseteq KEY
 ASSUME \A c \in CLIENT: CLIENT_PRIMARY[c] \in CLIENT_KEY[c]
 
-\* Timestamp of transactions.
-Ts == Nat \ {0}
-NoneTs == 0
-
 \* The algorithm is easier to understand in terms of the set of msgs of
 \* all messages that have ever been sent. A more accurate model would use
 \* one or more variables to represent the messages actually in transit,
@@ -87,13 +83,15 @@ VARIABLES client_ts
 \* for prewrite.
 VARIABLES client_key
 
+VARIABLES client_read
+
 \* next_ts is a globally monotonically increasing integer, representing
 \* the virtual clock of transactions. In practice, the variable is
 \* maintained by PD, the time oracle of a cluster.
 VARIABLES next_ts
 
 msg_vars == <<req_msgs, resp_msgs>>
-client_vars == <<client_state, client_ts, client_key>>
+client_vars == <<client_state, client_ts, client_key, client_read>>
 key_vars == <<key_data, key_lock, key_write>>
 vars == <<msg_vars, client_vars, key_vars, next_ts>>
 
@@ -104,10 +102,17 @@ SendResps(msgs) == resp_msgs' = resp_msgs \union msgs
 -----------------------------------------------------------------------------
 \* Type Definitions
 
+\* Timestamp for transactions.
+Ts == Nat \ {0}
+NoneTs == 0
+
+\* Represents the data version read from TiKV. NoneTs means that the value is empty.
+ValueTs == Ts \union {NoneTs}
+
 ReqMessages ==
           [start_ts : Ts, primary : KEY, type : {"lock_key"}, key : KEY,
             for_update_ts : Ts]
-  \union  [start_ts : Ts, primary : KEY, type : {"get"}, key : KEY]
+  \union  [start_ts : Ts, primary : KEY, type : {"read_optimistic"}, key : KEY]
   \union  [start_ts : Ts, primary : KEY, type : {"prewrite_optimistic"}, key : KEY]
   \union  [start_ts : Ts, primary : KEY, type : {"prewrite_pessimistic"}, key : KEY]
   \union  [start_ts : Ts, primary : KEY, type : {"commit"}, commit_ts : Ts]
@@ -134,23 +139,22 @@ ReqMessages ==
            resolving_pessimistic_lock : BOOLEAN]
 
 \* The RespMessages defined here is only a subset of the "actual" one in spec. Other resp messages are
-\* transmitted(passed) directly to the client by function arguments, defined in DirectRespMessages. By
+\* transmitted directly to the client by function arguments, defined in DirectRespMessages. By
 \* doing so, we cannot simuliate delay and re-transmition but only message losing. The reason why it works
 \* is that the response will not be delay and re-transmition in acutal gRPC implementation.
 \*
 \* The messages defined in RespMessages is used to record the history, in order to check the invariants.
 \* (e.g. TiKV server should never has responded a transcation committed while has responded the transaction rollbacked)
-RespMessages ==
-          [start_ts : Ts, type : {"read_success"}, key : KEY, value_ts : Ts \union {NoneTs}]
-  \union  [start_ts : Ts, type : {"committed",
-                                  "commit_aborted",
-                                  "prewrite_aborted",
-                                  "lock_key_aborted"}]
+RespMessages == [start_ts : Ts, type : {"committed",
+                                        "commit_aborted",
+                                        "lock_key_aborted",
+                                        "prewrite_aborted"}]
 
 DirectRespMessages ==
-          [start_ts : Ts, type : {"read_failed"}, key : KEY, lock_primary: KEY,  lock_ts : Ts]
-  \union  [start_ts : Ts, type : {"lock_key_success"}, key : KEY]
-  \union  [start_ts : Ts, type : {"lock_key_failed_has_lock"}, key : KEY, lock_primary: KEY,  lock_ts : Ts]
+          [start_ts : Ts, type : {"read_optimistic_succeed"}, key : KEY, value_ts : ValueTs]
+  \union  [start_ts : Ts, type : {"lock_key_succeed"}, key : KEY, for_update_ts : Ts, value_ts : ValueTs]
+  \union  [start_ts : Ts, type : {"read_optimistic_failed_has_lock",
+                                  "lock_key_failed_has_lock"}, key : KEY, lock_primary: KEY, lock_ts : Ts]
   \union  [start_ts : Ts, type : {"lock_key_failed_write_conflict"}, key : KEY, latest_commit_ts : Ts]
   \union  [start_ts : Ts, type : {"prewrited"}, key : KEY]
   \union  [start_ts : Ts, type : {"commit_ts_expired"}, min_commit_ts : Ts]
@@ -161,7 +165,8 @@ TypeOK == /\ req_msgs \in SUBSET ReqMessages
           /\ key_lock \in [KEY -> SUBSET [start_ts : Ts,
                                           primary : KEY,
                                           \* As defined above, Ts == Nat \ 0, here we use 0
-                                          \* to indicates that there's no min_commit_ts limit.
+                                          \* to indicates that there's no min_commit_ts limit
+                                          \* becuase every valid commit ts is larger than 0.
                                           min_commit_ts : Ts \union {NoneTs},
                                           type : {"prewrite_optimistic",
                                                   "prewrite_pessimistic",
@@ -171,11 +176,14 @@ TypeOK == /\ req_msgs \in SUBSET ReqMessages
               \union  [ts : Ts, start_ts : Ts, type : {"rollback"}, protected : BOOLEAN])]
           \* At most one lock in key_lock[k]
           /\ \A k \in KEY: Cardinality(key_lock[k]) <= 1
-          /\ client_state \in [CLIENT -> {"init", "read_finished", "locking", "prewriting", "committing"}]
+          /\ client_state \in [CLIENT -> {"init", "reading", "locking", "prewriting", "committing"}]
           /\ client_ts \in [CLIENT -> [start_ts : Ts \union {NoneTs},
                                        commit_ts : Ts \union {NoneTs},
                                        for_update_ts : Ts \union {NoneTs}]]
-          /\ client_key \in [CLIENT -> [locking: SUBSET KEY, prewriting : SUBSET KEY]]
+          /\ client_key \in [CLIENT -> [reading : SUBSET KEY, locking : SUBSET KEY, prewriting : SUBSET KEY]]
+          /\ client_read \in [CLIENT -> [KEY ->
+                                                [type : {"not_read_yet"}]
+                                         \union [type : {"read_succeed"}, value_ts : ValueTs]]]
           /\ \A c \in CLIENT: client_key[c].locking \intersect client_key[c].prewriting = {}
           /\ next_ts \in Ts
 -----------------------------------------------------------------------------
@@ -184,40 +192,75 @@ TypeOK == /\ req_msgs \in SUBSET ReqMessages
 \* Once the get request is sent, it exist permanently in the req_msgs.
 ClientReadOptimistic(c) ==
   /\ client_state[c] = "init"
+  /\ client_state' = [client_state EXCEPT ![c] = "reading"]
   /\ client_ts' = [client_ts EXCEPT ![c].start_ts = next_ts]
-  /\ client_state' = [client_state EXCEPT ![c] = "read_finished"]
+  /\ client_key' = [client_key EXCEPT ![c].reading = CLIENT_READ_KEY[c]]
   /\ next_ts' = next_ts + 1
-  /\ SendReqs({[type |-> "get",
+  /\ SendReqs({[type |-> "read_optimistic",
                 start_ts |-> client_ts'[c].start_ts,
                 primary |-> CLIENT_PRIMARY[c],
                 key |-> k] : k \in CLIENT_READ_KEY[c]})
-  /\ UNCHANGED <<resp_msgs, client_key, key_vars>>
+  /\ UNCHANGED <<resp_msgs, client_read, key_vars>>
+
+add_client_read_history(c, k, value_ts) ==
+  client_read' = [client_read EXCEPT ![c][k] = [type |-> "read_succeed", value_ts |-> value_ts]]
+
+ClientReadOptimisticSucceed(resp) ==
+  /\ Assert(resp.type = "read_optimistic_succeed", "Message Type Error")
+  /\ \/ UNCHANGED <<req_msgs, client_vars, next_ts>>
+     \/ \E c \in CLIENT:
+          /\ client_ts[c].start_ts = resp.start_ts
+          /\ client_state[c] = "reading"
+          /\ resp.key \in client_key[c].reading
+          /\ client_key' = [client_key EXCEPT ![c].reading = @ \ {resp.key}]
+          /\ add_client_read_history(c, resp.key, resp.value_ts)
+          /\ UNCHANGED <<req_msgs, client_ts, client_state, next_ts>>
+
+ClientReadOptimisticFailedHasLock(resp) ==
+  /\ Assert(resp.type = "read_optimistic_failed_has_lock", "Message Type Error")
+  /\ \/ UNCHANGED <<req_msgs, client_vars, next_ts>>
+     \/ \E c \in CLIENT:
+          /\ client_ts[c].start_ts = resp.start_ts
+          /\ SendReqs({[type |-> "check_txn_status",
+                        start_ts |-> resp.lock_ts,
+                        caller_start_ts |-> client_ts[c].start_ts,
+                        primary |-> resp.lock_primary,
+                        \* For a read failure, there can't be a pessimistic lock, since
+                        \* when the read simply ignores pessimistic lock.
+                        resolving_pessimistic_lock |-> FALSE]})
+          /\ UNCHANGED <<client_vars, next_ts>>
 
 ClientLockKey(c) ==
   /\ client_state[c] = "init"
   /\ client_state' = [client_state EXCEPT ![c] = "locking"]
   /\ client_ts' = [client_ts EXCEPT ![c].start_ts = next_ts, ![c].for_update_ts = next_ts]
-  /\ next_ts' = next_ts + 1
   /\ client_key' = [client_key EXCEPT ![c].locking = CLIENT_WRITE_KEY[c]]
+  /\ next_ts' = next_ts + 1
   \* For pessimistic clients assume we need to acquire pessimistic locks for all keys.
   /\ SendReqs({[type |-> "lock_key",
                 start_ts |-> client_ts'[c].start_ts,
                 primary |-> CLIENT_PRIMARY[c],
                 key |-> k,
                 for_update_ts |-> client_ts'[c].for_update_ts] : k \in CLIENT_WRITE_KEY[c]})
-  /\ UNCHANGED <<resp_msgs, key_vars>>
+  /\ UNCHANGED <<resp_msgs, client_read, key_vars>>
 
-ClientLockKeySuccess(resp) ==
-  /\ Assert(resp.type = "lock_key_success", "Message Type Error")
+ClientLockKeySucceed(resp) ==
+  /\ Assert(resp.type = "lock_key_succeed", "Message Type Error")
   /\ \/ UNCHANGED <<req_msgs, client_vars, next_ts>>
      \/ \E c \in CLIENT:
           /\ client_ts[c].start_ts = resp.start_ts
+          \* The client guarantees that it will never recieve a response for
+          \* a previously sent lock_key request with smaller for_update_ts, which
+          \* may carry a bad value that breaks the snapshot isolation. This
+          \* guarantee holds because the previous gRPC connection must have closed.
+          /\ client_ts[c].for_update_ts = resp.for_update_ts
           /\ client_state[c] = "locking"
           /\ resp.key \in client_key[c].locking
           /\ client_key' = [client_key EXCEPT ![c].locking = @ \ {resp.key}]
+          /\ add_client_read_history(c, resp.key, resp.value_ts)
           /\ UNCHANGED <<req_msgs, client_ts, client_state, next_ts>>
 
-ClientRetryLockKeyHasLock(resp) ==
+ClientLockKeyFailedHasLock(resp) ==
   /\ Assert(resp.type = "lock_key_failed_has_lock", "Message Type Error")
   /\ \/ UNCHANGED <<req_msgs, client_vars, next_ts>>
      \/ \E c \in CLIENT:
@@ -231,7 +274,7 @@ ClientRetryLockKeyHasLock(resp) ==
                         resolving_pessimistic_lock |-> resp.lock_type = "lock_key"]})
           /\ UNCHANGED <<client_vars, next_ts>>
 
-ClientRetryLockKeyWriteConflict(resp) ==
+ClientLockKeyFailedWriteConflict(resp) ==
   /\ Assert(resp.type = "lock_key_failed_write_conflict", "Message Type Error")
   /\ \/ UNCHANGED <<req_msgs, client_vars, next_ts>>
      \/ \E c \in CLIENT:
@@ -246,7 +289,18 @@ ClientRetryLockKeyWriteConflict(resp) ==
                         primary |-> CLIENT_PRIMARY[c],
                         key |-> resp.key,
                         for_update_ts |-> client_ts'[c].for_update_ts]})
-          /\ UNCHANGED <<client_state, client_key>>
+          /\ UNCHANGED <<client_state, client_key, client_read>>
+
+ClientPrewriteOptimistic(c) ==
+  /\ client_state[c] = "reading"
+  /\ client_key[c].reading = {}
+  /\ client_state' = [client_state EXCEPT ![c] = "prewriting"]
+  /\ client_key' = [client_key EXCEPT ![c].prewriting = CLIENT_WRITE_KEY[c]]
+  /\ SendReqs({[type |-> "prewrite_optimistic",
+                start_ts |-> client_ts[c].start_ts,
+                primary |-> CLIENT_PRIMARY[c],
+                key |-> k] : k \in CLIENT_WRITE_KEY[c]})
+  /\ UNCHANGED <<resp_msgs, client_ts, client_read, key_vars, next_ts>>
 
 ClientPrewritePessimistic(c) ==
   /\ client_state[c] = "locking"
@@ -257,31 +311,7 @@ ClientPrewritePessimistic(c) ==
                 start_ts |-> client_ts[c].start_ts,
                 primary |-> CLIENT_PRIMARY[c],
                 key |-> k] : k \in CLIENT_WRITE_KEY[c]})
-  /\ UNCHANGED <<resp_msgs, key_vars, client_ts, next_ts>>
-
-ClientReadOptimisticFailed(resp) ==
-  /\ Assert(resp.type = "read_failed", "Message Type Error")
-  /\ \/ UNCHANGED <<req_msgs, client_vars, next_ts>>
-     \/ \E c \in CLIENT:
-          /\ client_ts[c].start_ts = resp.start_ts
-          /\ SendReqs({[type |-> "check_txn_status",
-                        start_ts |-> resp.lock_ts,
-                        caller_start_ts |-> client_ts[c].start_ts,
-                        primary |-> resp.lock_primary,
-                        \* For a read failure, there can't be a pessimistic lock, since
-                        \* when the read simply ignores pessimistic lock.
-                        resolving_pessimistic_lock |-> FALSE]})
-          /\ UNCHANGED <<client_vars, next_ts>>
-
-ClientPrewriteOptimistic(c) ==
-  /\ client_state[c] = "read_finished"
-  /\ client_state' = [client_state EXCEPT ![c] = "prewriting"]
-  /\ client_key' = [client_key EXCEPT ![c].prewriting = CLIENT_WRITE_KEY[c]]
-  /\ SendReqs({[type |-> "prewrite_optimistic",
-                start_ts |-> client_ts[c].start_ts,
-                primary |-> CLIENT_PRIMARY[c],
-                key |-> k] : k \in CLIENT_WRITE_KEY[c]})
-  /\ UNCHANGED <<resp_msgs, client_ts, key_vars, next_ts>>
+  /\ UNCHANGED <<resp_msgs, client_ts, client_read, key_vars, next_ts>>
 
 ClientPrewrited(resp) ==
   /\ Assert(resp.type = "prewrited", "Message Type Error")
@@ -291,7 +321,7 @@ ClientPrewrited(resp) ==
           /\ client_state[c] = "prewriting"
           /\ resp.key \in client_key[c].prewriting
           /\ client_key' = [client_key EXCEPT ![c].prewriting = @ \ {resp.key}]
-          /\ UNCHANGED <<req_msgs, client_ts, client_state, next_ts>>
+          /\ UNCHANGED <<req_msgs, client_ts, client_state, client_read, next_ts>>
 
 ClientCommit(c) ==
   /\ client_state[c] = "prewriting"
@@ -303,7 +333,7 @@ ClientCommit(c) ==
                 start_ts |-> client_ts'[c].start_ts,
                 primary |-> CLIENT_PRIMARY[c],
                 commit_ts |-> client_ts'[c].commit_ts]})
-  /\ UNCHANGED <<resp_msgs, key_vars, client_key>>
+  /\ UNCHANGED <<resp_msgs, key_vars, client_key, client_read>>
 
 ClientRetryCommit(resp) ==
   /\ Assert(resp.type = "commit_ts_expired", "Message Type Error")
@@ -318,7 +348,7 @@ ClientRetryCommit(resp) ==
                         start_ts |-> client_ts'[c].start_ts,
                         primary |-> CLIENT_PRIMARY[c],
                         commit_ts |-> client_ts'[c].commit_ts]})
-          /\ UNCHANGED <<client_state, client_key>>
+          /\ UNCHANGED <<client_state, client_key, client_read>>
 -----------------------------------------------------------------------------
 \* Server Actions
 
@@ -379,21 +409,72 @@ find_readable_commit(k, read_ts) ==
   IN
     latest_commit_before_read_ts
 
-\* Read successfully. Return `value_ts = NoneTs` if the key has no value.
-respond_read_success(k, start_ts, read_ts) ==
+\* Optimistic read successfully. Return `value_ts = NoneTs` if the value is empty.
+respond_read_succeed(k, start_ts) ==
   LET
-    readable_commit == find_readable_commit(k, read_ts)
+    readable_commit == find_readable_commit(k, start_ts)
   IN
     \/ /\ readable_commit = {}
-       /\ SendResp([start_ts |-> start_ts,
-                    type |-> "read_success",
-                    key |-> k,
-                    value_ts |-> NoneTs])
+       /\ ClientReadOptimisticSucceed([start_ts |-> start_ts,
+                                       type |-> "read_optimistic_succeed",
+                                       key |-> k,
+                                       value_ts |-> NoneTs])
     \/ \E committed_record \in readable_commit:
-        /\ SendResp([start_ts |-> start_ts,
-                     type |-> "read_success",
-                     key |-> k,
-                     value_ts |-> committed_record.ts])
+        /\ ClientReadOptimisticSucceed([start_ts |-> start_ts,
+                                        type |-> "read_optimistic_succeed",
+                                        key |-> k,
+                                        value_ts |-> committed_record.ts])
+
+\* Pessimistic lock successfully. Return `value_ts = NoneTs` if the value is empty.
+respond_lock_key_succeed(k, start_ts, for_update_ts) ==
+  LET
+    readable_commit == find_readable_commit(k, for_update_ts)
+  IN
+    \/ /\ readable_commit = {}
+       /\ ClientLockKeySucceed([start_ts |-> start_ts,
+                                type |-> "lock_key_succeed",
+                                key |-> k,
+                                for_update_ts |-> for_update_ts,
+                                value_ts |-> NoneTs])
+    \/ \E committed_record \in readable_commit:
+        /\ ClientLockKeySucceed([start_ts |-> start_ts,
+                                 type |-> "lock_key_succeed",
+                                 key |-> k,
+                                 for_update_ts |-> for_update_ts,
+                                 value_ts |-> committed_record.ts])
+
+ServerReadKey ==
+  \E req \in req_msgs :
+    /\ req.type = "read_optimistic"
+    /\ \E c \in CLIENT :
+      /\ client_ts[c].start_ts = req.start_ts
+      /\ LET
+           k == req.key
+           start_ts == req.start_ts
+         IN
+           \* If the lock belongs to the transaction sending the request, or
+           \* if it's a pessimistic lock, return read succeed.
+           \*
+           \* The reason why pessimistic lock will not block the read is that
+           \* the owner transaction of the pessimistic lock is impossible to
+           \* commit the key with a commit_ts smaller than req.start_ts because
+           \* the owner transaction must get commit_ts after all prewrites have
+           \* completed which is apperently not done since the lock type is
+           \* not a prewrite lock.
+           /\ IF \/ key_lock[k] = {}
+                 \/ \E l \in key_lock[k]: l.type = "lock_key" \/ l.start_ts = start_ts
+              THEN
+                /\ respond_read_succeed(k, start_ts)
+                /\ UNCHANGED <<resp_msgs, key_vars, next_ts>>
+              ELSE
+                \E l \in key_lock[k]:
+                  /\ ClientReadOptimisticFailedHasLock(
+                      [start_ts |-> start_ts,
+                       type |-> "read_optimistic_failed_has_lock",
+                       key |-> k,
+                       lock_primary |-> l.primary,
+                       lock_ts |-> l.start_ts])
+                  /\ UNCHANGED <<resp_msgs, key_vars>>
 
 ServerLockKey ==
   \E req \in req_msgs :
@@ -428,17 +509,14 @@ ServerLockKey ==
                                                               primary |-> req.primary,
                                                               min_commit_ts |-> NoneTs,
                                                               type |-> "lock_key"]}]
-                     /\ respond_read_success(k, start_ts, for_update_ts)
-                     /\ ClientLockKeySuccess([start_ts |-> start_ts,
-                                              type |-> "lock_key_success",
-                                              key |-> k])
-                     /\ UNCHANGED <<key_data, key_write>>
+                     /\ respond_lock_key_succeed(k, start_ts, for_update_ts)
+                     /\ UNCHANGED <<resp_msgs, key_data, key_write>>
                   \* Otherwise, reject the request and let client to retry
                   \* with new for_update_ts.
                   \/ \E w \in latest_commit :
                       /\ w.ts > req.for_update_ts
                       /\ ~ \E w2 \in all_commits: w2.start_ts = req.start_ts
-                      /\ ClientRetryLockKeyWriteConflict([start_ts |-> start_ts,
+                      /\ ClientLockKeyFailedWriteConflict([start_ts |-> start_ts,
                                                           type |-> "lock_key_failed_write_conflict",
                                                           key |-> k,
                                                           latest_commit_ts |-> w.ts])
@@ -447,51 +525,16 @@ ServerLockKey ==
         \/ \E l \in key_lock[k]:
             IF l.start_ts = start_ts
             THEN
-              /\ respond_read_success(k, start_ts, for_update_ts)
-              /\ ClientLockKeySuccess([start_ts |-> start_ts,
-                                       type |-> "lock_key_success",
-                                       key |-> k])
-              /\ UNCHANGED <<key_vars>>
+              /\ respond_lock_key_succeed(k, start_ts, for_update_ts)
+              /\ UNCHANGED <<resp_msgs, key_vars>>
             ELSE
-              /\ ClientRetryLockKeyHasLock([start_ts |-> start_ts,
+              /\ ClientLockKeyFailedHasLock([start_ts |-> start_ts,
                                             type |-> "lock_key_failed_has_lock",
                                             key |-> k,
                                             lock_primary |-> l.primary,
                                             lock_ts |-> l.start_ts,
                                             lock_type |-> l.type])
               /\ UNCHANGED <<resp_msgs, key_vars>>
-
-ServerReadKey ==
-  \E req \in req_msgs :
-    /\ req.type = "get"
-    /\ \E c \in CLIENT :
-      /\ client_ts[c].start_ts = req.start_ts
-      /\ LET
-           k == req.key
-           start_ts == req.start_ts
-         IN
-           \* If the lock belongs to the transaction sending the request, or
-           \* if it's a pessimistic lock, return read success.
-           \*
-           \* The reason why pessimistic lock will not block the read is that
-           \* the owner transaction of the pessimistic lock is impossible to
-           \* commit the key with a commit_ts smaller than req.start_ts because
-           \* the owner transaction must get commit_ts after all prewrites have
-           \* completed which is apperently not done since the lock type is
-           \* not a prewrite lock.
-           /\ IF \/ key_lock[k] = {}
-                 \/ \E l \in key_lock[k]: l.type = "lock_key" \/ l.start_ts = start_ts
-              THEN
-                /\ respond_read_success(k, start_ts, start_ts)
-                /\ UNCHANGED <<req_msgs, client_vars, key_vars, next_ts>>
-              ELSE
-                \E l \in key_lock[k]:
-                  /\ ClientReadOptimisticFailed([start_ts |-> start_ts,
-                                                 type |-> "read_failed",
-                                                 key |-> k,
-                                                 lock_primary |-> l.primary,
-                                                 lock_ts |-> l.start_ts])
-                  /\ UNCHANGED <<resp_msgs, key_vars>>
 
 ServerPrewritePessimistic ==
   \E req \in req_msgs :
@@ -688,10 +731,11 @@ Init ==
   /\ req_msgs = {}
   /\ resp_msgs = {}
   /\ client_state = [c \in CLIENT |-> "init"]
-  /\ client_key = [c \in CLIENT |-> [locking |-> {}, prewriting |-> {}]]
+  /\ client_key = [c \in CLIENT |-> [reading |-> {}, locking |-> {}, prewriting |-> {}]]
   /\ client_ts = [c \in CLIENT |-> [start_ts |-> NoneTs,
                                     commit_ts |-> NoneTs,
                                     for_update_ts |-> NoneTs]]
+  /\ client_read = [c \in CLIENT |-> [k \in KEY |-> [type |-> "not_read_yet"]]]
   /\ key_lock = [k \in KEY |-> {}]
   /\ key_data = [k \in KEY |-> {}]
   /\ key_write = [k \in KEY |-> {}]
@@ -794,33 +838,28 @@ MsgTsConsistency ==
 
 OptimisticReadSnapshotIsolation ==
   \A c \in OPTIMISTIC_CLIENT:
-    \A resp \in resp_msgs:
-      resp.start_ts = client_ts[c].start_ts /\  resp.type = "read_success" =>
+    \A k \in CLIENT_READ_KEY[c]:
+      client_read[c][k].type = "read_succeed" =>
         LET
-          k == resp.key
-          readable_commit == find_readable_commit(k, resp.start_ts)
+          readable_commit == find_readable_commit(k, client_ts[c].start_ts)
         IN
           \/ /\ readable_commit = {}
-             /\ resp.value_ts = NoneTs
+             /\ client_read[c][k].value_ts = NoneTs
           \/ \E committed_record \in readable_commit:
-              resp.value_ts = committed_record.ts
+              client_read[c][k].value_ts = committed_record.ts
 
 PessimisticReadSnapshotIsolation ==
   \A c \in PESSIMISTIC_CLIENT:
-    \A read_resp \in resp_msgs:
-      (/\ read_resp.start_ts = client_ts[c].start_ts
-       /\ read_resp.type = "read_success"
-       /\ \E commit_resp \in resp_msgs:
-            commit_resp.start_ts = read_resp.start_ts /\ commit_resp.type = "committed") =>
-              LET
-                k == read_resp.key
-                read_ts == client_ts[c].for_update_ts
-                readable_commit == find_readable_commit(k, read_ts)
-              IN
-                \/ /\ readable_commit = {}
-                   /\ read_resp.value_ts = NoneTs
-                \/ \E committed_record \in readable_commit:
-                    read_resp.value_ts = committed_record.ts
+    (\E resp \in resp_msgs: resp.start_ts = client_ts[c].start_ts /\ resp.type = "committed") =>
+      \A k \in CLIENT_WRITE_KEY[c]:
+        client_read[c][k].type = "read_succeed" =>
+          LET
+            readable_commit == find_readable_commit(k, client_ts[c].for_update_ts)
+          IN
+            \/ /\ readable_commit = {}
+               /\ client_read[c][k].value_ts = NoneTs
+            \/ \E committed_record \in readable_commit:
+                client_read[c][k].value_ts = committed_record.ts
 -----------------------------------------------------------------------------
 THEOREM Safety ==
   Spec => [](/\ TypeOK
