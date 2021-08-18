@@ -831,5 +831,6 @@ THEOREM Safety ==
              /\ UniqueLockOrWrite
              /\ UniqueWrite
              /\ OptimisticReadSnapshotIsolation
-             /\ PessimisticReadSnapshotIsolation)
+             /\ PessimisticReadSnapshotIsolation
+             /\ MsgTsConsistency)
 =============================================================================
