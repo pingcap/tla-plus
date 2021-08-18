@@ -154,12 +154,13 @@ ReqMessages ==
 \* client handling function only changes the client state to one key and leaving the state to other keys
 \* untouched, which makes the order of receiving the response to different keys is irrelevant.
 \*
-\* One more draw back is that, a resent request may call the client handling function, which is impossible
-\* in real-world because the client must drop the previous connection before retry, in other words, the
-\* client is only possible to recieve and handle the response to the request it last sent. We overcome this
-\* by checking whether the client is in the right stage to haneld the response. But still, the model will face
-\* to some response to the resent resquest for the same client stage. However, the model has just tested
-\* more but no less cases comparing to the real-world, and is still passing the check.
+\* One more draw back is that, a delayed resent request to server may result in a call the client
+\* handling function, which is impossible in real-world because the client must drop the previous
+\* connection before retry, in other words, the client is only possible to recieve and to handle the
+\* response to the request it last sent. We overcome this by checking whether the client is in the right
+\* stage to haneld the response. But still, the model will face to some response to the resent resquest
+\* for the same client stage. However, the model has just been tested against more but no less cases
+\* comparing to the real-world, and is still passing the check.
 DirectRespMessages ==
           [start_ts : Ts, type : {"read_optimistic_succeed"}, key : KEY, value_ts : ValueTs]
   \union  [start_ts : Ts, type : {"lock_key_succeed"}, key : KEY, for_update_ts : Ts, value_ts : ValueTs]
