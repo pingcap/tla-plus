@@ -8,6 +8,9 @@ CONSTANTS KEY
 CONSTANTS OPTIMISTIC_CLIENT, PESSIMISTIC_CLIENT
 CLIENT == PESSIMISTIC_CLIENT \union OPTIMISTIC_CLIENT
 
+CONSTANTS ASYNC_CLIENT
+ASSUME ASYNC_CLIENT \in SUBSET CLIENT
+
 CONSTANTS CLIENT_READ_KEY, CLIENT_WRITE_KEY
 CLIENT_KEY == [c \in CLIENT |-> CLIENT_READ_KEY[c] \union CLIENT_WRITE_KEY[c]]
 
@@ -121,6 +124,8 @@ ReqMessages ==
             for_update_ts : Ts]
   \union  [start_ts : Ts, primary : KEY, type : {"read_optimistic"}, key : KEY]
   \union  [start_ts : Ts, primary : KEY, type : {"prewrite_optimistic"}, key : KEY]
+  \union  [start_ts : Ts, primary : KEY, type : {"async_prewrite_optimistic"},
+            key : KEY, all_keys : SUBSET KEY]
   \union  [start_ts : Ts, primary : KEY, type : {"prewrite_pessimistic"}, key : KEY]
   \union  [start_ts : Ts, primary : KEY, type : {"commit"}, commit_ts : Ts]
   \union  [start_ts : Ts, primary : KEY, type : {"resolve_rollbacked"}]
@@ -184,15 +189,20 @@ RespMessages == [start_ts : Ts, type : {"committed",
 TypeOK == /\ req_msgs \in SUBSET ReqMessages
           /\ resp_msgs \in SUBSET RespMessages
           /\ key_data \in [KEY -> SUBSET Ts]
-          /\ key_lock \in [KEY -> SUBSET [start_ts : Ts,
-                                          primary : KEY,
-                                          \* As defined above, Ts == Nat \ 0, here we use 0
-                                          \* to indicates that there's no min_commit_ts limit
-                                          \* becuase every valid commit ts is larger than 0.
-                                          min_commit_ts : Ts \union {NoneTs},
-                                          type : {"prewrite_optimistic",
-                                                  "prewrite_pessimistic",
-                                                  "lock_key"}]]
+          /\ key_lock \in [KEY -> SUBSET ([start_ts : Ts,
+                                           primary : KEY,
+                                           \* As defined above, Ts == Nat \ 0, here we use 0
+                                           \* to indicates that there's no min_commit_ts limit
+                                           \* becuase every valid commit ts is larger than 0.
+                                           min_commit_ts : Ts \union {NoneTs},
+                                           type : {"prewrite_optimistic",
+                                                   "prewrite_pessimistic",
+                                                   "lock_key"}]
+                                   \union [start_ts : Ts,
+                                           primary : KEY,
+                                           min_commit_ts : Ts \union {NoneTs},
+                                           type : {"async"},
+                                           all_keys : SUBSET KEY])]
           /\ key_write \in [KEY -> SUBSET (
                       [ts : Ts, start_ts : Ts, type : {"commit"}]
               \union  [ts : Ts, start_ts : Ts, type : {"rollback"}, protected : BOOLEAN])]
@@ -305,22 +315,40 @@ ClientPrewriteOptimistic(c) ==
   /\ client_key[c].reading = {}
   /\ client_stage' = [client_stage EXCEPT ![c] = "prewriting"]
   /\ client_key' = [client_key EXCEPT ![c].prewriting = CLIENT_WRITE_KEY[c]]
-  /\ SendReqs({[type |-> "prewrite_optimistic",
-                start_ts |-> client_ts[c].start_ts,
-                primary |-> CLIENT_PRIMARY[c],
-                key |-> k] : k \in CLIENT_WRITE_KEY[c]})
-  /\ UNCHANGED <<resp_msgs, client_ts, client_read, key_vars, next_ts>>
+  /\ IF c \in ASYNC_CLIENT 
+     THEN
+       /\ SendReqs({[type |-> "async_prewrite_optimistic",
+                     start_ts |-> client_ts[c].start_ts,
+                     primary |-> CLIENT_PRIMARY[c],
+                     key |-> k,
+                     all_keys |-> CLIENT_WRITE_KEY[c]] : k \in CLIENT_WRITE_KEY[c]})
+       /\ UNCHANGED <<resp_msgs, client_ts, client_read, key_vars, next_ts>>
+     ELSE
+       /\ SendReqs({[type |-> "prewrite_optimistic",
+                     start_ts |-> client_ts[c].start_ts,
+                     primary |-> CLIENT_PRIMARY[c],
+                     key |-> k] : k \in CLIENT_WRITE_KEY[c]})
+       /\ UNCHANGED <<resp_msgs, client_ts, client_read, key_vars, next_ts>>
 
 ClientPrewritePessimistic(c) ==
   /\ client_stage[c] = "locking"
   /\ client_key[c].locking = {}
   /\ client_stage' = [client_stage EXCEPT ![c] = "prewriting"]
   /\ client_key' = [client_key EXCEPT ![c].prewriting = CLIENT_WRITE_KEY[c]]
-  /\ SendReqs({[type |-> "prewrite_pessimistic",
-                start_ts |-> client_ts[c].start_ts,
-                primary |-> CLIENT_PRIMARY[c],
-                key |-> k] : k \in CLIENT_WRITE_KEY[c]})
-  /\ UNCHANGED <<resp_msgs, client_ts, client_read, key_vars, next_ts>>
+  /\ IF c \in ASYNC_CLIENT
+     THEN
+       /\ SendReqs({[type |-> "prewrite_pessimistic",
+                     start_ts |-> client_ts[c].start_ts,
+                     primary |-> CLIENT_PRIMARY[c],
+                     key |-> k,
+                     all_keys |-> CLIENT_WRITE_KEY[c]] : k \in CLIENT_WRITE_KEY[c]})
+       /\ UNCHANGED <<resp_msgs, client_ts, client_read, key_vars, next_ts>>
+     ELSE
+       /\ SendReqs({[type |-> "prewrite_pessimistic",
+                     start_ts |-> client_ts[c].start_ts,
+                     primary |-> CLIENT_PRIMARY[c],
+                     key |-> k] : k \in CLIENT_WRITE_KEY[c]})
+       /\ UNCHANGED <<resp_msgs, client_ts, client_read, key_vars, next_ts>>
 
 ClientPrewrited(resp) ==
   /\ Assert(resp.type = "prewrited", "Message Type Error")
@@ -336,13 +364,24 @@ ClientCommit(c) ==
   /\ client_stage[c] = "prewriting"
   /\ client_key[c].prewriting = {}
   /\ client_stage' = [client_stage EXCEPT ![c] = "committing"]
-  /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = next_ts]
-  /\ next_ts' = next_ts + 1
-  /\ SendReqs({[type |-> "commit",
-                start_ts |-> client_ts'[c].start_ts,
-                primary |-> CLIENT_PRIMARY[c],
-                commit_ts |-> client_ts'[c].commit_ts]})
-  /\ UNCHANGED <<resp_msgs, key_vars, client_key, key_max_ts, client_read>>
+  /\ IF c \in ASYNC_CLIENT
+     THEN
+       \* TODO: update the async version
+       /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = next_ts]
+       /\ next_ts' = next_ts + 1
+       /\ SendReqs({[type |-> "commit",
+                     start_ts |-> client_ts'[c].start_ts,
+                     primary |-> CLIENT_PRIMARY[c],
+                     commit_ts |-> client_ts'[c].commit_ts]})
+       /\ UNCHANGED <<resp_msgs, key_vars, client_key, key_max_ts, client_read>>
+     ELSE
+       /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = next_ts]
+       /\ next_ts' = next_ts + 1
+       /\ SendReqs({[type |-> "commit",
+                     start_ts |-> client_ts'[c].start_ts,
+                     primary |-> CLIENT_PRIMARY[c],
+                     commit_ts |-> client_ts'[c].commit_ts]})
+       /\ UNCHANGED <<resp_msgs, key_vars, client_key, key_max_ts, client_read>>
 
 ClientRetryCommit(resp) ==
   /\ Assert(resp.type = "commit_ts_expired", "Message Type Error")
