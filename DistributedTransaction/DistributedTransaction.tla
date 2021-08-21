@@ -127,6 +127,8 @@ ReqMessages ==
   \union  [start_ts : Ts, primary : KEY, type : {"async_prewrite_optimistic"},
             key : KEY, all_keys : SUBSET KEY]
   \union  [start_ts : Ts, primary : KEY, type : {"prewrite_pessimistic"}, key : KEY]
+  \union  [start_ts : Ts, primary : KEY, type : {"async_prewrite_pessimistic"},
+            key : KEY, all_keys : SUBSET KEY]
   \union  [start_ts : Ts, primary : KEY, type : {"commit"}, commit_ts : Ts]
   \union  [start_ts : Ts, primary : KEY, type : {"resolve_rollbacked"}]
   \union  [start_ts : Ts, primary : KEY, type : {"resolve_committed"}, commit_ts : Ts]
@@ -179,7 +181,7 @@ DirectRespMessages ==
   \union  [start_ts : Ts, type : {"commit_ts_expired"}, min_commit_ts : Ts]
 
 \* The responses defined in RespMessages will not be handled by the client in this spec, because they all
-\* drive the transaction the an end. The messages defined here are used to record the history, in order to
+\* drive the transaction to an end. The messages defined here are used to record the history, in order to
 \* check the invariants later defined in the spec (e.g. TiKV server should never has responded a transcation
 \* committed while it has also responded the transaction aborted).
 RespMessages == [start_ts : Ts, type : {"committed",
@@ -206,10 +208,13 @@ TypeOK == /\ req_msgs \in SUBSET ReqMessages
                                            all_keys : SUBSET KEY])]
           /\ key_write \in [KEY -> SUBSET (
                       [ts : Ts, start_ts : Ts, type : {"commit"}]
-              \union  [ts : Ts, start_ts : Ts, type : {"rollback"}, protected : BOOLEAN])]
+              \union  [ts : Ts, start_ts : Ts, type : {"rollback"}, protected : BOOLEAN]
+              \union  [start_ts : Ts, commit_ts : Ts, type : {"overlapped"}])]
           /\ key_max_ts \in [KEY -> Ts \union {NoneTs}]
           \* At most one lock in key_lock[k]
           /\ \A k \in KEY: Cardinality(key_lock[k]) <= 1
+          \* The final stage of a txn: "committed" or "aborted" is now defined here,
+          \* as described above, we use the var `RespMessages` to represent them.
           /\ client_stage \in [CLIENT -> {"init", "reading", "locking", "prewriting", "committing"}]
           /\ client_ts \in [CLIENT -> [start_ts : Ts \union {NoneTs},
                                        commit_ts : Ts \union {NoneTs},
@@ -346,7 +351,7 @@ ClientPrewritePessimistic(c) ==
   /\ client_key' = [client_key EXCEPT ![c].prewriting = CLIENT_WRITE_KEY[c]]
   /\ IF c \in ASYNC_CLIENT
      THEN
-       /\ SendReqs({[type |-> "prewrite_pessimistic",
+       /\ SendReqs({[type |-> "async_prewrite_pessimistic",
                      start_ts |-> client_ts[c].start_ts,
                      primary |-> CLIENT_PRIMARY[c],
                      key |-> k,
@@ -442,15 +447,18 @@ rollback(k, start_ts) ==
     /\ key_data' = [key_data EXCEPT ![k] = @ \ {start_ts}]
     /\ IF ~ \E w \in key_write[k]: w.ts = start_ts
        THEN
-            key_write' = [key_write EXCEPT
-              ![k] =
-                \* collapse rollback
-                (@ \ {w \in @: w.type = "rollback" /\ ~ w.protected /\ w.ts < start_ts})
-                \* write rollback record
-                \union {[ts |-> start_ts,
-                        start_ts |-> start_ts,
-                        type |-> "rollback",
-                        protected |-> protected]}]
+          key_write' = [key_write EXCEPT
+            ![k] =
+              \* collapse rollback
+              (@ \ {w \in @: w.type = "rollback" /\ ~ w.protected /\ w.ts < start_ts})
+              \* write rollback record
+              \union {[ts |-> start_ts,
+                      start_ts |-> start_ts,
+                      type |-> "rollback",
+                      protected |-> protected]}]
+       ELSE IF \E w \in key_write[k]: w.type = "commit" /\ w.ts = start_ts
+       THEN
+          key_write' = [key_write EXCEPT ![k] = [start_ts |-> key_write[k].start_ts, commit_ts |-> start_ts, type |-> "overlapped"]]
        ELSE
           UNCHANGED <<key_write>>
 
@@ -846,7 +854,9 @@ keyCommitted(k, start_ts) ==
 \* A transaction can't be both committed and aborted.
 UniqueCommitOrAbort ==
   \A resp, resp2 \in resp_msgs :
-    (resp.type = "committed") /\ (resp2.type = "commit_aborted") =>
+    (resp.type = "committed") /\ (resp2.type \in {"commit_aborted",
+                                                  "lock_key_aborted",
+                                                  "prewrite_aborted"}) =>
       resp.start_ts /= resp2.start_ts
 
 \* If a transaction is committed, the primary key must be committed and
@@ -855,21 +865,32 @@ UniqueCommitOrAbort ==
 CommitConsistency ==
   \A resp \in resp_msgs :
     (resp.type = "committed") =>
-      \E c \in CLIENT :
-        /\ client_ts[c].start_ts = resp.start_ts
-        \* Primary key must be committed
-        /\ keyCommitted(CLIENT_PRIMARY[c], resp.start_ts)
-        \* Secondary key must be either committed or locked by the
-        \* start_ts of the transaction.
-        /\ \A k \in CLIENT_WRITE_KEY[c] :
-            (~ \E l \in key_lock[k]: l.start_ts = resp.start_ts) =
-              keyCommitted(k, resp.start_ts)
+      \/ \E c \in CLIENT:
+           /\ client_ts[c].start_ts = resp.start_ts
+           \* Primary key must be committed
+           /\ keyCommitted(CLIENT_PRIMARY[c], resp.start_ts)
+           \* Secondary key must be either committed or locked by the
+           \* start_ts of the transaction.
+           /\ \A k \in CLIENT_WRITE_KEY[c]:
+               (~ \E l \in key_lock[k]: l.start_ts = resp.start_ts) =
+                 keyCommitted(k, resp.start_ts)
+      \/ \E c \in ASYNC_CLIENT:
+           /\ client_ts[c].start_ts = resp.start_ts
+           \* For every key in an async txn, either it's committed,
+           \* or it's prewrited and the corresponding lock exists.
+           /\ \A k \in CLIENT_WRITE_KEY[c]:
+                \/ keyCommitted(k, resp.start_ts)
+                \/ \E l \in key_lock[k]: 
+                      /\ l.type \in {"async_prewrite_optimistic", "async_prewrite_pessimistic"}
+                      /\ l.ts = resp.start_ts
 
 \* If a transaction is aborted, all key of that transaction must not be
 \* committed.
 AbortConsistency ==
   \A resp \in resp_msgs :
-    (resp.type = "commit_aborted") =>
+    (resp.type \in {"commit_aborted", 
+                    "lock_key_aborted",
+                    "prewrite_aborted"}) =>
       \A c \in CLIENT :
         (client_ts[c].start_ts = resp.start_ts) =>
           ~ keyCommitted(CLIENT_PRIMARY[c], resp.start_ts)
@@ -885,6 +906,9 @@ WriteConsistency ==
          /\ w.start_ts \in key_data[k]
       \/ /\ w.type = "rollback"
          /\ w.ts = w.start_ts
+      \/ /\ w.type = "overlapped"
+         /\ w.commit_ts > w.start_ts
+         /\ w.start_ts \in key_data[k]
 
 \* When the lock exists, there can't be a corresponding commit record,
 \* vice versa.
