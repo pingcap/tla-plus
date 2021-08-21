@@ -175,6 +175,7 @@ DirectRespMessages ==
   \union  [start_ts : Ts, type : {"key_is_locked"}, key : KEY, lock_primary: KEY, lock_ts : Ts]
   \union  [start_ts : Ts, type : {"lock_key_failed_write_conflict"}, key : KEY, latest_commit_ts : Ts]
   \union  [start_ts : Ts, type : {"prewrited"}, key : KEY]
+  \union  [start_ts : Ts, type : {"async_prewrited"}, key : KEY, max_ts : Ts \union {NoneTs}]
   \union  [start_ts : Ts, type : {"commit_ts_expired"}, min_commit_ts : Ts]
 
 \* The responses defined in RespMessages will not be handled by the client in this spec, because they all
@@ -219,6 +220,11 @@ TypeOK == /\ req_msgs \in SUBSET ReqMessages
                                          \union [type : {"read_succeed"}, value_ts : ValueTs]]]
           /\ \A c \in CLIENT: client_key[c].locking \intersect client_key[c].prewriting = {}
           /\ next_ts \in Ts
+-----------------------------------------------------------------------------
+\* Util functions
+Max(S) == CHOOSE x \in S: 
+               \A y \in S: 
+                 y <= x
 -----------------------------------------------------------------------------
 \* Client Actions
 
@@ -317,12 +323,15 @@ ClientPrewriteOptimistic(c) ==
   /\ client_key' = [client_key EXCEPT ![c].prewriting = CLIENT_WRITE_KEY[c]]
   /\ IF c \in ASYNC_CLIENT 
      THEN
+       \* Async commit, get a min_commit_ts from pd.
+       /\ client_ts' = [client_ts EXCEPT ![c].min_commit_ts = next_ts]
+       /\ next_ts' = next_ts + 1
        /\ SendReqs({[type |-> "async_prewrite_optimistic",
                      start_ts |-> client_ts[c].start_ts,
                      primary |-> CLIENT_PRIMARY[c],
                      key |-> k,
                      all_keys |-> CLIENT_WRITE_KEY[c]] : k \in CLIENT_WRITE_KEY[c]})
-       /\ UNCHANGED <<resp_msgs, client_ts, client_read, key_vars, next_ts>>
+       /\ UNCHANGED <<resp_msgs, client_read, key_vars>>
      ELSE
        /\ SendReqs({[type |-> "prewrite_optimistic",
                      start_ts |-> client_ts[c].start_ts,
@@ -351,14 +360,20 @@ ClientPrewritePessimistic(c) ==
        /\ UNCHANGED <<resp_msgs, client_ts, client_read, key_vars, next_ts>>
 
 ClientPrewrited(resp) ==
-  /\ Assert(resp.type = "prewrited", "Message Type Error")
+  /\ Assert(resp.type \in {"prewrited", "aysnc_prewrited"}, "Message Type Error")
   /\ \/ UNCHANGED <<req_msgs, client_vars, next_ts>>
      \/ \E c \in CLIENT:
           /\ client_ts[c].start_ts = resp.start_ts
           /\ client_stage[c] = "prewriting"
           /\ resp.key \in client_key[c].prewriting
           /\ client_key' = [client_key EXCEPT ![c].prewriting = @ \ {resp.key}]
-          /\ UNCHANGED <<req_msgs, client_ts, client_stage, client_read, key_max_ts, next_ts>>
+          /\ IF c \in ASYNC_CLIENT
+             THEN
+               /\ client_ts' = [client_ts EXCEPT ![c].min_commit_ts = 
+                                 Max({client_ts[c].min_commit_ts, resp.max_ts + 1})]
+               /\ UNCHANGED <<req_msgs, client_stage, client_read, key_max_ts, next_ts>>
+             ELSE
+               /\ UNCHANGED <<req_msgs, client_ts, client_stage, client_read, key_max_ts, next_ts>>
 
 ClientCommit(c) ==
   /\ client_stage[c] = "prewriting"
@@ -366,9 +381,7 @@ ClientCommit(c) ==
   /\ client_stage' = [client_stage EXCEPT ![c] = "committing"]
   /\ IF c \in ASYNC_CLIENT
      THEN
-       \* TODO: update the async version
-       /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = next_ts]
-       /\ next_ts' = next_ts + 1
+       /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = client_ts[c].min_commit_ts]
        /\ SendReqs({[type |-> "commit",
                      start_ts |-> client_ts'[c].start_ts,
                      primary |-> CLIENT_PRIMARY[c],
