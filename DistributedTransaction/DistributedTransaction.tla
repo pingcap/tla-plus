@@ -372,6 +372,7 @@ ClientPrewrited(resp) ==
           /\ client_stage[c] = "prewriting"
           /\ resp.key \in client_key[c].prewriting
           /\ client_key' = [client_key EXCEPT ![c].prewriting = @ \ {resp.key}]
+          /\ ~ \E resp2 \in resp_msgs: resp2.type = "prewrite_aborted" /\ resp2.start_ts = client_ts[c].start_ts
           /\ IF c \in ASYNC_CLIENT
              THEN
                /\ client_ts' = [client_ts EXCEPT ![c].min_commit_ts = 
@@ -652,7 +653,7 @@ ServerPrewritePessimistic ==
         \* acquired, or, if there's no lock, and no write record whose
         \* commit_ts >= start_ts, otherwise abort the transaction.
         IF
-          \/ \E l \in key_lock[k] :
+          \/ \E l \in key_lock[k]:
              /\ l.start_ts = start_ts
              /\ l.type = "lock_key"
           \/ /\ key_lock[k] = {}
@@ -665,6 +666,15 @@ ServerPrewritePessimistic ==
           /\ key_data' = [key_data EXCEPT ![k] = @ \union {start_ts}]
           /\ ClientPrewrited([start_ts |-> start_ts, type |-> "prewrited", key |-> k])
           /\ UNCHANGED <<resp_msgs, key_write, key_max_ts>>
+        \* duplicated prewrite message
+        ELSE IF \/ \E l \in key_lock[k]: 
+                     /\ l.type \in {"async_prewrite_pessimistic", "prewrite_pessimistic"}
+                     /\ l.start_ts = start_ts
+                \/ \E w \in key_write[k]:
+                     /\ w.type \in {"commit", "overlapped"}
+                     /\ w.start_ts = start_ts
+        THEN
+          /\ UNCHANGED <<vars>>
         ELSE
           /\ SendResp([start_ts |-> start_ts, type |-> "prewrite_aborted"])
           /\ UNCHANGED <<req_msgs, client_vars, key_vars, next_ts>>
@@ -863,26 +873,29 @@ UniqueCommitOrAbort ==
 \* the secondary keys of the same transaction must be either committed
 \* or locked.
 CommitConsistency ==
-  \A resp \in resp_msgs :
-    (resp.type = "committed") =>
-      \/ \E c \in CLIENT:
-           /\ client_ts[c].start_ts = resp.start_ts
-           \* Primary key must be committed
-           /\ keyCommitted(CLIENT_PRIMARY[c], resp.start_ts)
-           \* Secondary key must be either committed or locked by the
-           \* start_ts of the transaction.
-           /\ \A k \in CLIENT_WRITE_KEY[c]:
-               (~ \E l \in key_lock[k]: l.start_ts = resp.start_ts) =
-                 keyCommitted(k, resp.start_ts)
-      \/ \E c \in ASYNC_CLIENT:
-           /\ client_ts[c].start_ts = resp.start_ts
-           \* For every key in an async txn, either it's committed,
-           \* or it's prewrited and the corresponding lock exists.
-           /\ \A k \in CLIENT_WRITE_KEY[c]:
-                \/ keyCommitted(k, resp.start_ts)
-                \/ \E l \in key_lock[k]: 
-                      /\ l.type \in {"async_prewrite_optimistic", "async_prewrite_pessimistic"}
-                      /\ l.ts = resp.start_ts
+  /\ \A resp \in resp_msgs:
+      (resp.type = "committed") =>
+        \/ \E c \in CLIENT:
+             /\ client_ts[c].start_ts = resp.start_ts
+             \* Primary key must be committed
+             /\ keyCommitted(CLIENT_PRIMARY[c], resp.start_ts)
+             \* Secondary key must be either committed or locked by the
+             \* start_ts of the transaction.
+             /\ \A k \in CLIENT_WRITE_KEY[c]:
+                 (~ \E l \in key_lock[k]: l.start_ts = resp.start_ts) =
+                   keyCommitted(k, resp.start_ts)
+  \* For async clients, once every key is prewrited, the txn is considered
+  \* commited, so consistency check starts at this time.
+  /\ \A c \in ASYNC_CLIENT: 
+       (/\ client_stage[c] \in {"prewriting", "committing"}
+        /\ client_key[c].prewriting = {}) =>
+          \* For every key in an async txn, either it's committed,
+          \* or it's prewrited and the corresponding lock exists.
+          /\ \A k \in CLIENT_WRITE_KEY[c]:
+               \/ keyCommitted(k, client_ts[c].start_ts)
+               \/ \E l \in key_lock[k]: 
+                    /\ l.type \in {"async_prewrite_optimistic", "async_prewrite_pessimistic"}
+                    /\ l.ts = client_ts[c].start_ts
 
 \* If a transaction is aborted, all key of that transaction must not be
 \* committed.
