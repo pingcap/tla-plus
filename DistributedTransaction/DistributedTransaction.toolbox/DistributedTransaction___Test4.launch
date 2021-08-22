@@ -2,7 +2,7 @@
 <launchConfiguration type="org.lamport.tla.toolbox.tool.tlc.modelCheck">
     <stringAttribute key="TLCCmdLineParameters" value=""/>
     <intAttribute key="collectCoverage" value="1"/>
-    <stringAttribute key="configurationName" value="Test2"/>
+    <stringAttribute key="configurationName" value="Test4"/>
     <booleanAttribute key="deferLiveness" value="false"/>
     <intAttribute key="dfidDepth" value="100"/>
     <booleanAttribute key="dfidMode" value="false"/>
@@ -12,7 +12,7 @@
     <stringAttribute key="distributedTLC" value="off"/>
     <stringAttribute key="distributedTLCVMArgs" value=""/>
     <intAttribute key="fpBits" value="1"/>
-    <intAttribute key="fpIndex" value="59"/>
+    <intAttribute key="fpIndex" value="117"/>
     <booleanAttribute key="fpIndexRandom" value="true"/>
     <intAttribute key="maxHeapSize" value="45"/>
     <intAttribute key="maxSetSize" value="1000000"/>
@@ -36,16 +36,21 @@
         <listEntry value="1ReadSnapshotIsolation"/>
     </listAttribute>
     <listAttribute key="modelCorrectnessProperties"/>
-    <intAttribute key="modelEditorOpenTabs" value="12"/>
-    <stringAttribute key="modelExpressionEval" value=""/>
+    <intAttribute key="modelEditorOpenTabs" value="0"/>
+    <stringAttribute key="modelExpressionEval" value="&#9;"/>
+    <stringAttribute key="modelParameterActionConstraint" value=""/>
     <listAttribute key="modelParameterConstants">
-        <listEntry value="KEY;;{k1, k2, k3};1;0"/>
-        <listEntry value="PESSIMISTIC_CLIENT;;{c1, c2};1;0"/>
-        <listEntry value="OPTIMISTIC_CLIENT;;{c3};1;0"/>
-        <listEntry value="CLIENT_PRIMARY;;c1 :&gt; k1 @@ c2 :&gt; k1 @@ c3 :&gt; k3;0;0"/>
-        <listEntry value="CLIENT_WRITE_KEY;;c1 :&gt; {k1, k2, k3} @@ c2 :&gt; {k1, k2} @@ c3 :&gt; {k1, k3};0;0"/>
-        <listEntry value="CLIENT_READ_KEY;;c1 :&gt; {} @@ c2 :&gt; {} @@ c3 :&gt; {k1, k3};0;0"/>
+        <listEntry value="KEY;;{k1};1;0"/>
+        <listEntry value="PESSIMISTIC_CLIENT;;{c1};1;0"/>
+        <listEntry value="OPTIMISTIC_CLIENT;;{c2};1;0"/>
+        <listEntry value="CLIENT_PRIMARY;;c1 :&gt; k1 @@ c2 :&gt; k1;0;0"/>
+        <listEntry value="CLIENT_WRITE_KEY;;c1 :&gt; {k1} @@ c2 :&gt; {k1};0;0"/>
+        <listEntry value="CLIENT_READ_KEY;;c1 :&gt; {} @@ c2 :&gt; {k1};0;0"/>
     </listAttribute>
+    <stringAttribute key="modelParameterContraint" value=""/>
+    <listAttribute key="modelParameterDefinitions"/>
+    <stringAttribute key="modelParameterModelValues" value="{}"/>
+    <stringAttribute key="modelParameterNewDefinitions" value=""/>
     <intAttribute key="modelVersion" value="20191005"/>
     <intAttribute key="numberOfWorkers" value="7"/>
     <booleanAttribute key="recover" value="false"/>
