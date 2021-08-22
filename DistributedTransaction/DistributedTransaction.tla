@@ -187,7 +187,8 @@ DirectRespMessages ==
 RespMessages == [start_ts : Ts, type : {"committed",
                                         "commit_aborted",
                                         "lock_key_aborted",
-                                        "prewrite_aborted"}]
+                                        "prewrite_aborted",
+                                        "check_txn_status_aborted"}]
 
 TypeOK == /\ req_msgs \in SUBSET ReqMessages
           /\ resp_msgs \in SUBSET RespMessages
@@ -204,7 +205,7 @@ TypeOK == /\ req_msgs \in SUBSET ReqMessages
                                    \union [start_ts : Ts,
                                            primary : KEY,
                                            min_commit_ts : Ts \union {NoneTs},
-                                           type : {"async"},
+                                           type : {"async_optimistic", "async_pessimistic"},
                                            all_keys : SUBSET KEY])]
           /\ key_write \in [KEY -> SUBSET (
                       [ts : Ts, start_ts : Ts, type : {"commit"}]
@@ -218,7 +219,8 @@ TypeOK == /\ req_msgs \in SUBSET ReqMessages
           /\ client_stage \in [CLIENT -> {"init", "reading", "locking", "prewriting", "committing"}]
           /\ client_ts \in [CLIENT -> [start_ts : Ts \union {NoneTs},
                                        commit_ts : Ts \union {NoneTs},
-                                       for_update_ts : Ts \union {NoneTs}]]
+                                       for_update_ts : Ts \union {NoneTs},
+                                       min_commit_ts : Ts \union {NoneTs}]]
           /\ client_key \in [CLIENT -> [reading : SUBSET KEY, locking : SUBSET KEY, prewriting : SUBSET KEY]]
           /\ client_read \in [CLIENT -> [KEY ->
                                                 [type : {"not_read_yet"}]
@@ -365,7 +367,7 @@ ClientPrewritePessimistic(c) ==
        /\ UNCHANGED <<resp_msgs, client_ts, client_read, key_vars, next_ts>>
 
 ClientPrewrited(resp) ==
-  /\ Assert(resp.type \in {"prewrited", "aysnc_prewrited"}, "Message Type Error")
+  /\ Assert(resp.type \in {"prewrited", "async_prewrited"}, "Message Type Error")
   /\ \/ UNCHANGED <<req_msgs, client_vars, next_ts>>
      \/ \E c \in CLIENT:
           /\ client_ts[c].start_ts = resp.start_ts
@@ -387,12 +389,14 @@ ClientCommit(c) ==
   /\ client_stage' = [client_stage EXCEPT ![c] = "committing"]
   /\ IF c \in ASYNC_CLIENT
      THEN
-       /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = client_ts[c].min_commit_ts]
+       /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = Max({client_ts[c].min_commit_ts,
+                                                               client_ts[c].start_ts + 1,
+                                                               client_ts[c].for_update_ts + 1})]
        /\ SendReqs({[type |-> "commit",
                      start_ts |-> client_ts'[c].start_ts,
                      primary |-> CLIENT_PRIMARY[c],
                      commit_ts |-> client_ts'[c].commit_ts]})
-       /\ UNCHANGED <<resp_msgs, key_vars, client_key, key_max_ts, client_read>>
+       /\ UNCHANGED <<resp_msgs, key_vars, client_key, key_max_ts, client_read, next_ts>>
      ELSE
        /\ client_ts' = [client_ts EXCEPT ![c].commit_ts = next_ts]
        /\ next_ts' = next_ts + 1
@@ -604,7 +608,7 @@ ServerLockKey ==
 
 ServerPrewriteOptimistic ==
   \E req \in req_msgs:
-    /\ req.type = "prewrite_optimistic"
+    /\ req.type \in {"prewrite_optimistic", "async_prewrite_optimistic"}
     /\ LET
         k == req.key
         start_ts == req.start_ts
@@ -620,18 +624,35 @@ ServerPrewriteOptimistic ==
                 /\ UNCHANGED <<req_msgs, client_vars, key_vars, next_ts>>
               ELSE
                 \* Prewrite the key.
-                /\ key_lock' = [key_lock EXCEPT ![k] = {[start_ts |-> start_ts,
-                                                         primary |-> req.primary,
-                                                         type |-> "prewrite_optimistic",
-                                                         min_commit_ts |-> NoneTs]}]
                 /\ key_data' = [key_data EXCEPT ![k] = @ \union {start_ts}]
-                /\ ClientPrewrited([start_ts |-> start_ts, type |-> "prewrited", key |-> k])
-                /\ UNCHANGED <<resp_msgs, key_write, key_max_ts>>
+                /\ IF req.type = "async_prewrite_optimistic"
+                   THEN
+                     /\ key_lock' = [key_lock EXCEPT ![k] = {[start_ts |-> start_ts,
+                                                              primary |-> req.primary,
+                                                              type |-> "async_optimistic",
+                                                              min_commit_ts |-> NoneTs,
+                                                              all_keys |-> req.all_keys]}]
+                     /\ ClientPrewrited([start_ts |-> start_ts, type |-> "async_prewrited",
+                                         key |-> k, max_ts |-> key_max_ts[k]])
+                     /\ UNCHANGED <<resp_msgs, key_write, key_max_ts>>
+                   ELSE 
+                     /\ key_lock' = [key_lock EXCEPT ![k] = {[start_ts |-> start_ts,
+                                                              primary |-> req.primary,
+                                                              type |-> "prewrite_optimistic",
+                                                              min_commit_ts |-> NoneTs]}]
+                     /\ ClientPrewrited([start_ts |-> start_ts, type |-> "prewrited", key |-> k])
+                     /\ UNCHANGED <<resp_msgs, key_write, key_max_ts>>
         \/ \E l \in key_lock[k]:
             IF l.start_ts = start_ts
             THEN
-              /\ ClientPrewrited([start_ts |-> start_ts, type |-> "prewrited", key |-> k])
-              /\ UNCHANGED <<resp_msgs, key_vars>>
+              /\ IF req.type = "async_prewrite_optimistic"
+                 THEN
+                   /\ ClientPrewrited([start_ts |-> start_ts, type |-> "async_prewrited",
+                                       key |-> k, max_ts |-> key_max_ts[k]])
+                   /\ UNCHANGED <<resp_msgs, key_vars>>
+                 ELSE 
+                   /\ ClientPrewrited([start_ts |-> start_ts, type |-> "prewrited", key |-> k])
+                   /\ UNCHANGED <<resp_msgs, key_vars>>
             ELSE
               \* Clean up the stale lock.
               /\ ClientResolveLock([start_ts |-> start_ts,
@@ -644,7 +665,7 @@ ServerPrewriteOptimistic ==
 
 ServerPrewritePessimistic ==
   \E req \in req_msgs :
-    /\ req.type = "prewrite_pessimistic"
+    /\ req.type \in {"prewrite_pessimistic", "async_prewrite_pessimistic"}
     /\ LET
         k == req.key
         start_ts == req.start_ts
@@ -659,16 +680,27 @@ ServerPrewritePessimistic ==
           \/ /\ key_lock[k] = {}
              /\ ~ \E w \in key_write[k]: w.ts >= start_ts
         THEN
-          /\ key_lock' = [key_lock EXCEPT ![k] = {[start_ts |-> start_ts,
-                                                   primary |-> req.primary,
-                                                   type |-> "prewrite_pessimistic",
-                                                   min_commit_ts |-> NoneTs]}]
           /\ key_data' = [key_data EXCEPT ![k] = @ \union {start_ts}]
-          /\ ClientPrewrited([start_ts |-> start_ts, type |-> "prewrited", key |-> k])
-          /\ UNCHANGED <<resp_msgs, key_write, key_max_ts>>
+          /\ IF req.type = "async_prewrite_pessimistic"
+             THEN
+               /\ key_lock' = [key_lock EXCEPT ![k] = {[start_ts |-> start_ts,
+                                                        primary |-> req.primary,
+                                                        type |-> "async_pessimistic",
+                                                        min_commit_ts |-> NoneTs,
+                                                        all_keys |-> req.all_keys]}]
+               /\ ClientPrewrited([start_ts |-> start_ts, type |-> "async_prewrited",
+                                   key |-> k, max_ts |-> key_max_ts[k]])
+               /\ UNCHANGED <<resp_msgs, key_write, key_max_ts>>
+             ELSE
+               /\ key_lock' = [key_lock EXCEPT ![k] = {[start_ts |-> start_ts,
+                                                        primary |-> req.primary,
+                                                        type |-> "prewrite_pessimistic",
+                                                        min_commit_ts |-> NoneTs]}]
+               /\ ClientPrewrited([start_ts |-> start_ts, type |-> "prewrited", key |-> k])
+               /\ UNCHANGED <<resp_msgs, key_write, key_max_ts>>
         \* duplicated prewrite message
         ELSE IF \/ \E l \in key_lock[k]: 
-                     /\ l.type \in {"async_prewrite_pessimistic", "prewrite_pessimistic"}
+                     /\ l.type \in {"async_pessimistic", "prewrite_pessimistic"}
                      /\ l.start_ts = start_ts
                 \/ \E w \in key_write[k]:
                      /\ w.type \in {"commit", "overlapped"}
@@ -714,6 +746,13 @@ ServerCommit ==
              /\ SendResp([start_ts |-> start_ts, type |-> "commit_aborted"])
              /\ UNCHANGED <<req_msgs, client_vars, key_vars, next_ts>>
 
+\* Check whether there is a "commit" record in key_write[k] corresponding
+\* to start_ts.
+keyCommitted(k, start_ts) ==
+  \E w \in key_write[k] :
+    /\ w.start_ts = start_ts
+    /\ w.type = "commit"
+
 \* Found the matching lock.
 check_txn_status_has_lock(lock, caller_start_ts, resolving_pessimistic_lock) ==
   LET
@@ -726,19 +765,63 @@ check_txn_status_has_lock(lock, caller_start_ts, resolving_pessimistic_lock) ==
         /\ unlock_key(pk)
         /\ UNCHANGED <<msg_vars, key_data, key_write, key_max_ts, client_vars, next_ts>>
       ELSE
-        /\ rollback(pk, start_ts)
-        /\ SendReqs({[type |-> "resolve_rollbacked",
-                      start_ts |-> start_ts,
-                      primary |-> pk]})
-        /\ UNCHANGED <<resp_msgs, client_vars, key_max_ts, next_ts>>
+        /\ IF lock.type \in {"async_optimistic", "async_pessimistic"}
+           THEN
+             \* For async commit transactions, if every key is either locked or
+             \* committed, we must *not* rollback it.
+             LET 
+              all_keys == (CHOOSE pk_lock \in key_lock[pk] : TRUE).all_keys
+             IN
+              IF \A k \in all_keys:
+                   \/ \E l2 \in key_lock[k]: l2.type = lock.type /\ l2.start_ts = start_ts
+                   \/ keyCommitted(k, start_ts)
+              THEN
+                \* A little bit inconsistent with real world TiKV.
+                LET
+                 all_async_locked_key == {k \in all_keys : 
+                                            (\E l2 \in key_lock[k]: 
+                                               l2.type = lock.type /\ l2.start_ts = start_ts)}
+                 all_min_commit_ts == {(CHOOSE l2 \in key_lock[k] : TRUE).min_commit_ts : k \in all_async_locked_key}
+                 commit_ts == Max(all_min_commit_ts \union {start_ts}) + 1
+                IN
+                /\ commit(pk, start_ts, commit_ts)
+                /\ SendReqs({[type |-> "resolve_committed",
+                              start_ts |-> start_ts,
+                              primary |-> pk,
+                              commit_ts |-> commit_ts]})
+                /\ UNCHANGED <<resp_msgs, client_vars, key_data, key_max_ts, next_ts>>
+              ELSE
+                /\ rollback(pk, start_ts)
+                /\ SendReqs({[type |-> "resolve_rollbacked",
+                              start_ts |-> start_ts,
+                              primary |-> pk]})
+                /\ SendResp([type |-> "check_txn_status_aborted",
+                             start_ts |-> start_ts])
+                /\ UNCHANGED <<client_vars, key_max_ts, next_ts>>
+           ELSE
+             /\ rollback(pk, start_ts)
+             /\ SendReqs({[type |-> "resolve_rollbacked",
+                           start_ts |-> start_ts,
+                           primary |-> pk]})
+             /\ UNCHANGED <<resp_msgs, client_vars, key_max_ts, next_ts>>
     \/
       \* Push min_commit_ts.
       /\ lock.min_commit_ts <= caller_start_ts
-      /\ key_lock' = [key_lock EXCEPT ![pk] = {[start_ts |-> lock.start_ts,
-                                                type |-> lock.type,
-                                                primary |-> lock.primary,
-                                                min_commit_ts |-> caller_start_ts + 1]}]
-      /\ UNCHANGED <<msg_vars, key_data, key_write, key_max_ts, client_vars, next_ts>>
+      /\ IF lock.type \in {"async_optimistic", "async_pessimistic"} 
+         THEN
+           /\ key_lock' = [key_lock EXCEPT ![pk] = {[start_ts |-> lock.start_ts,
+                                                     type |-> lock.type,
+                                                     primary |-> lock.primary,
+                                                     min_commit_ts |-> caller_start_ts + 1,
+                                                     all_keys |-> lock.all_keys]}]
+           /\ UNCHANGED <<msg_vars, key_data, key_write, key_max_ts, client_vars, next_ts>>
+         ELSE
+           /\ key_lock' = [key_lock EXCEPT ![pk] = {[start_ts |-> lock.start_ts,
+                                                     type |-> lock.type,
+                                                     primary |-> lock.primary,
+                                                     min_commit_ts |-> caller_start_ts + 1]}]
+           /\ UNCHANGED <<msg_vars, key_data, key_write, key_max_ts, client_vars, next_ts>>
+          
 
 \* Lock not found or start_ts on the lock mismatches.
 check_txn_status_missing_lock(start_ts, pk, resolving_pessimistic_lock) ==
@@ -825,7 +908,8 @@ Init ==
   /\ client_key = [c \in CLIENT |-> [reading |-> {}, locking |-> {}, prewriting |-> {}]]
   /\ client_ts = [c \in CLIENT |-> [start_ts |-> NoneTs,
                                     commit_ts |-> NoneTs,
-                                    for_update_ts |-> NoneTs]]
+                                    for_update_ts |-> NoneTs,
+                                    min_commit_ts |-> NoneTs]]
   /\ client_read = [c \in CLIENT |-> [k \in KEY |-> [type |-> "not_read_yet"]]]
   /\ key_lock = [k \in KEY |-> {}]
   /\ key_data = [k \in KEY |-> {}]
@@ -854,13 +938,6 @@ Spec == Init /\ [][Next]_vars
 -----------------------------------------------------------------------------
 \* Consistency Invariants
 
-\* Check whether there is a "commit" record in key_write[k] corresponding
-\* to start_ts.
-keyCommitted(k, start_ts) ==
-  \E w \in key_write[k] :
-    /\ w.start_ts = start_ts
-    /\ w.type = "commit"
-
 \* A transaction can't be both committed and aborted.
 UniqueCommitOrAbort ==
   \A resp, resp2 \in resp_msgs :
@@ -888,14 +965,18 @@ CommitConsistency ==
   \* commited, so consistency check starts at this time.
   /\ \A c \in ASYNC_CLIENT: 
        (/\ client_stage[c] \in {"prewriting", "committing"}
-        /\ client_key[c].prewriting = {}) =>
+        /\ client_key[c].prewriting = {}
+        /\ ~ \E resp \in resp_msgs: 
+               /\ resp.type \in {"prewrite_aborted", "lock_key_aborted",
+                                 "check_txn_status_aborted", "commit_aborted"}
+               /\ resp.start_ts = client_ts[c].start_ts) =>
           \* For every key in an async txn, either it's committed,
           \* or it's prewrited and the corresponding lock exists.
           /\ \A k \in CLIENT_WRITE_KEY[c]:
                \/ keyCommitted(k, client_ts[c].start_ts)
                \/ \E l \in key_lock[k]: 
-                    /\ l.type \in {"async_prewrite_optimistic", "async_prewrite_pessimistic"}
-                    /\ l.ts = client_ts[c].start_ts
+                    /\ l.type \in {"async_optimistic", "async_pessimistic"}
+                    /\ l.start_ts = client_ts[c].start_ts
 
 \* If a transaction is aborted, all key of that transaction must not be
 \* committed.

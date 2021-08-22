@@ -10,5 +10,5 @@ PessimisticClient == {c1, c2}
 ClientReadKeys == c1 :> {} @@ c2 :> {} @@ c3 :> {k1, k2}
 ClientWriteKeys == c1 :> {k1, k2} @@ c2 :> {k1} @@ c3 :> {k1, k2}
 ClientPrimary == c1 :> k1 @@ c2 :> k1 @@ c3 :> k2
-AsyncClient == {c1}
+AsyncClient == {c1, c2, c3}
 ================================================================================
