@@ -463,7 +463,9 @@ rollback(k, start_ts) ==
                       protected |-> protected]}]
        ELSE IF \E w \in key_write[k]: w.type = "commit" /\ w.ts = start_ts
        THEN
-          key_write' = [key_write EXCEPT ![k] = [start_ts |-> key_write[k].start_ts, commit_ts |-> start_ts, type |-> "overlapped"]]
+          key_write' = [key_write EXCEPT ![k] = (@ \ {w \in @: w.type = "commit" /\ w.ts = start_ts}) 
+                                                \union [start_ts |-> key_write[k].start_ts, 
+                                                        commit_ts |-> start_ts, type |-> "overlapped"]]
        ELSE
           UNCHANGED <<key_write>>
 
@@ -782,8 +784,14 @@ check_txn_status_has_lock(lock, caller_start_ts, resolving_pessimistic_lock) ==
                                             (\E l2 \in key_lock[k]: 
                                                l2.type = lock.type /\ l2.start_ts = start_ts)}
                  all_min_commit_ts == {(CHOOSE l2 \in key_lock[k] : TRUE).min_commit_ts : k \in all_async_locked_key}
-                 commit_ts == Max(all_min_commit_ts \union {start_ts}) + 1
+
+                 client == CHOOSE c \in CLIENT: client_ts[c].start_ts = start_ts
+                 all_key_max_ts == {key_max_ts[k] : k \in CLIENT_KEY[client]}
+                 commit_ts == Max(all_min_commit_ts 
+                                  \union all_key_max_ts       
+                                  \union {start_ts}) + 1
                 IN
+                /\ next_ts > commit_ts
                 /\ commit(pk, start_ts, commit_ts)
                 /\ SendReqs({[type |-> "resolve_committed",
                               start_ts |-> start_ts,
@@ -984,7 +992,8 @@ AbortConsistency ==
   \A resp \in resp_msgs :
     (resp.type \in {"commit_aborted", 
                     "lock_key_aborted",
-                    "prewrite_aborted"}) =>
+                    "prewrite_aborted",
+                    "check_txn_status_aborted"}) =>
       \A c \in CLIENT :
         (client_ts[c].start_ts = resp.start_ts) =>
           ~ keyCommitted(CLIENT_PRIMARY[c], resp.start_ts)
