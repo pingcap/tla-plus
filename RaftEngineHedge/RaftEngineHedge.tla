@@ -31,14 +31,10 @@ CONSTANT AbortThreshold
 \* max data size of the whole raft-engine, the actual size does not matter in this spec
 CONSTANT MaxDataSize
 
+CONSTANT InitData1, InitData2
+
 \* head, tail for hedge File system's disk1 and disk2's queue, as well as normal file system's disk queue
 VARIABLES head_1, head_2, tail_1, tail_2, head, tail
-
-\* flag if disk1 has newer data
-VARIABLE is_disk1_newer
-
-\* index of last sealed log
-VARIABLE raft_log_last_index, raft_log_last_index1,raft_log_last_index2
 
 \* the raft-engine's sealed data (not actively appending data)
 VARIABLE sealed_data, sealed_data1, sealed_data2
@@ -49,7 +45,7 @@ VARIABLE active_data, active_data1, active_data2
 \* which disk is aborted. 0 means both disks are working normally
 VARIABLE abort
 
-vars == <<head_1, head_2, tail_1, tail_2, head, tail, is_disk1_newer, raft_log_last_index, raft_log_last_index1,raft_log_last_index2, sealed_data, sealed_data1, sealed_data2, active_data, active_data1, active_data2, abort>>
+vars == <<head_1, head_2, tail_1, tail_2, head, tail, sealed_data, sealed_data1, sealed_data2, active_data, active_data1, active_data2, abort>>
 -------------------------------------------------------------------------------
 \* Helper functions.
 Max(a, b) == IF a > b THEN a ELSE b
@@ -59,22 +55,19 @@ Min(a, b) == IF a < b THEN a ELSE b
 \* For simplicity, assuming the data before the nunber is needed
 InitData ==
 LET
-    data1 == CHOOSE i \in 0..MaxDataSize : TRUE
-    data2 == CHOOSE i \in 0..MaxDataSize : TRUE
+    data1 == InitData1
+    data2 == InitData2
     data == Max(data1, data2)
 IN
-    /\ head_1 = data
-    /\ head_2 = data
+    /\ head_1 = data1
+    /\ head_2 = data2
     /\ head = data
-    /\ tail_1 = data
-    /\ tail_2 = data
+    /\ tail_1 = data \* when initialize, the slow disk's queue would be filled data from fast disk
+    /\ tail_2 = data \* when initialize, the slow disk's queue would be filled data from fast disk
     /\ tail = data
-    /\ sealed_data1 = {i: i \in 0..data1}
-    /\ sealed_data2 = {i: i \in 0..data2}
-    /\ sealed_data = {i: i \in 0..data}
-    /\ raft_log_last_index1 = data1 
-    /\ raft_log_last_index2 = data2
-    /\ raft_log_last_index = data
+    /\ sealed_data1 = {i: i \in 0..data1-1}
+    /\ sealed_data2 = {i: i \in 0..data2-1}
+    /\ sealed_data = {i: i \in 0..data-1}
 
 \* append raft log into disk queues, not persisted yet
 AppendRaftLog ==
@@ -93,26 +86,26 @@ AppendRaftLog ==
 \* The actual persisted log size is random per disk
 PersistLog ==
 LET 
-    writes1 == CHOOSE i \in 0..tail_1 - head_1  : TRUE
-    writes2 == CHOOSE i \in 0..tail_2 - head_2 : TRUE
+    writes1 == RandomElement(0..tail_1 - head_1)
+    writes2 == RandomElement(0..tail_2 - head_2)
 IN
     \/  /\ abort = 0
         /\ head_1' = head_1 + writes1
         /\ head_2' = head_2 + writes2
         /\ head' = Max(head_1', head_2') \* for simplicity, the normal file system's queue length is same as max(disk1, disk2) 
-        /\ active_data1' =  active_data1 \cup {head_1 .. head_1'}
-        /\ active_data2' =  active_data2 \cup {head_2 .. head_2'}
-        /\ active_data' =  active_data \cup {head .. head'}
+        /\ active_data1' =  active_data1 \cup {i : i \in head_1 .. head_1'-1}
+        /\ active_data2' =  active_data2 \cup {i : i \in head_2 .. head_2'-1}
+        /\ active_data' =  active_data \cup {i : i \in head .. head'-1}
     \/  /\ abort = 1
         /\ head_2' = head_2 + writes2
-        /\ head' = Max(head_1', head_2') 
-        /\ active_data2' =  active_data2 \cup {head_2 .. head_2'}
-        /\ active_data' =  active_data \cup {head .. head'}
+        /\ head' = Max(head, head_2')
+        /\ active_data2' =  active_data2 \cup {i : i \in head_2 .. head_2'-1}
+        /\ active_data' =  active_data \cup {i : i \in head .. head'-1}
     \/  /\ abort = 2
         /\ head_1' = head_1 + writes1
-        /\ head' = Max(head_1', head_2') 
-        /\ active_data1' =  active_data1 \cup {head_1 .. head_1'}
-        /\ active_data' =  active_data \cup {head .. head'}
+        /\ head' = Max(head_1', head) 
+        /\ active_data1' =  active_data1 \cup {i : i \in head_1 .. head_1'-1}
+        /\ active_data' =  active_data \cup {i : i \in head .. head'-1}
 
 \* Delete some raft logs
 Delete(set, setX) ==
@@ -128,46 +121,41 @@ Purge(set, setX) ==
 
 \* rewrite old data (sealed_data)
 Rewrite ==  
-    \/ /\ is_disk1_newer = TRUE
+    \/ /\ head_1 >= head_2 
        /\ Purge(sealed_data, sealed_data1)
-       /\ sealed_data2' = sealed_data1' 
-    \/ /\ is_disk1_newer = FALSE
+       /\ sealed_data2' = sealed_data1'
+    \/ /\ head_1 < head_2
        /\ Purge(sealed_data, sealed_data2)
        /\ sealed_data1' = sealed_data2'
 
 \* seal the active_data
 \* Note: Seal must be called after PersistLog to ensure active_data1 correct
-Seal == 
+Seal ==
     \/  /\ abort = 0
         /\ sealed_data1' = sealed_data1 \cup active_data1 \* seal the active_data1
-        /\ active_data1' = {head_1 .. head_1'}
-        /\ raft_log_last_index1' = head_1
+        /\ active_data1' = {}
         /\ sealed_data2' = sealed_data2 \cup active_data2 \* seal the active_data2 
-        /\ active_data2' = {head_2 .. head_2'}
-        /\ raft_log_last_index2' = head_2
-        /\ sealed_data' = sealed_data \cup sealed_data 
-        /\ active_data' = {head .. head'}
-        /\ raft_log_last_index' = head
+        /\ active_data2' = {}
+        /\ sealed_data' = sealed_data \cup active_data 
+        /\ active_data' = {}
     \/  /\ abort = 1
         /\ sealed_data2' = sealed_data2 \cup active_data2 \* seal the active_data2 
-        /\ active_data2' = {head_2 .. head_2'}
-        /\ raft_log_last_index2' = head_2
-        /\ sealed_data' = sealed_data \cup sealed_data 
-        /\ active_data' = {head .. head'}
-        /\ raft_log_last_index' = head
+        /\ active_data2' = {}
+        /\ sealed_data' = sealed_data \cup active_data 
+        /\ active_data' = {}
+        /\ UNCHANGED  <<sealed_data1, active_data1>> 
     \/  /\ abort = 2
         /\ sealed_data1' = sealed_data1 \cup active_data1 \* seal the active_data1
-        /\ active_data1' = {head_1 .. head_1'}
-        /\ raft_log_last_index1' = head_1
-        /\ sealed_data' = sealed_data \cup sealed_data 
-        /\ active_data' = {head .. head'}
-        /\ raft_log_last_index' = head
+        /\ active_data1' = {}
+        /\ sealed_data' = sealed_data \cup active_data 
+        /\ active_data' = {}
+        /\ UNCHANGED  <<sealed_data2, active_data2>> 
 
 \* seal and rewrite cannot run concurrently due to the contest on sealed_data
 \* in the code, the file list is protected by the lock
 SealOrRewrite ==
 LET
-    flag == CHOOSE i \in 0..1  : TRUE
+    flag == RandomElement(0..1)
 IN
     \/  /\ flag = 0
         /\ Rewrite
@@ -175,47 +163,57 @@ IN
         /\ Seal
     
 \* check if we need to abort one of the disk
-MaybeAbort == abort' = 
-        IF tail_1 - head_1 > AbortThreshold THEN
-            /\ tail_1' = 0
-            /\ head_1' = 0
-            /\ 1 
-        ELSE
-            IF tail_2 - head_2 > AbortThreshold THEN
-            /\ tail_2' = 0
-            /\ head_2' = 0
-            /\ 2 
-            ELSE 0
+MaybeAbort ==
+        \/  /\  head_1 >= head_2 
+            /\  \/  /\ tail_2 - head_2 > AbortThreshold
+                    /\ abort' = 2
+                \/  /\ tail_2 - head_2 <= AbortThreshold
+                    /\ abort' = 0
+        \/  /\  head_1 < head_2 
+            /\  \/  /\  tail_1 - head_1 > AbortThreshold
+                    /\ abort' = 1
+                \/  /\ tail_1 - head_1 <= AbortThreshold
+                    /\ abort' = 0
 
 \* background catch up between two disks after one disk is aborted
 BackgroundCatchup ==
+    \/  /\ abort = 0
     \/  /\ abort = 1
         /\ sealed_data1' = sealed_data2'
-        /\ head_1' = head_2
-        /\ tail_1' = tail_2
-        /\ raft_log_last_index1' = head_2
-    \/  /\ abort = 2 
+        /\ active_data1' = active_data2'
+        \*/\ UNCHANGED <<sealed_data1, active_data1>> 
+        /\ head_1' = head_2'
+        /\ tail_1' = tail_2'
+    \/  /\ abort = 2
         /\ sealed_data2' = sealed_data1'
-        /\ head_2' = head_1
-        /\ tail_2' = tail_1
-        /\ raft_log_last_index2' = head_1
+        /\ active_data2' = active_data1'
+        \*/\ UNCHANGED <<sealed_data2, active_data2>>
+        /\ head_2' = head_1'
+        /\ tail_2' = tail_1'
+
+Unchanged == 
+    \/ /\ abort = 0
+       /\ UNCHANGED <<sealed_data, sealed_data1, sealed_data2>>
+    \/ /\ abort = 1
+       /\ UNCHANGED <<sealed_data, sealed_data2>>
+    \/ /\ abort = 2
+       /\ UNCHANGED <<sealed_data, sealed_data1>>
 -------------------------------------------------------------------------------
 Init ==
-    /\ head_1 = 0
-    /\ head_2 = 0
-    /\ head = 0
     /\ active_data = {}
     /\ active_data1 = {}
     /\ active_data2 = {}
     /\ abort = 0
-    /\ is_disk1_newer = (head_1 >= head_2)
     /\ InitData
 
 Next ==
-    /\ is_disk1_newer' = (head_1 >= head_2)
+    /\ tail < MaxDataSize
+    \*/\ PrintT("abort=" \o ToString(abort))
+    \*/\ PrintT("head_1=" \o ToString(head_1) \o " head_2=" \o ToString(head_2) \o " head_=" \o ToString(head))
+    \*/\ PrintT("tail_1=" \o ToString(tail_1) \o " tail_2=" \o ToString(tail_2) \o " tail=" \o ToString(tail))
     /\ AppendRaftLog
-    /\ PersistLog
-    /\ SealOrRewrite
+    /\ \/ Cardinality(active_data) < 5 /\ PersistLog /\ Unchanged
+       \/ Cardinality(active_data) >= 5 /\ Seal /\ UNCHANGED <<head_1, head_2, head>>
     /\ MaybeAbort
     /\ BackgroundCatchup 
    
@@ -227,7 +225,7 @@ Spec ==
 DataInvariant ==
     /\ Max(head_1, head_2) = head 
     /\ Max(tail_1, tail_2) = tail
-    /\ is_disk1_newer => (sealed_data \cup active_data) = (sealed_data1 \cup active_data1)
-    /\ ~is_disk1_newer => (sealed_data \cup active_data) = (sealed_data2 \cup active_data2)
+    /\ head_1 >= head_2 => (active_data \cup sealed_data) = (active_data1 \cup sealed_data1)
+    /\ head_1 < head_2 => (active_data \cup sealed_data) = (active_data2 \cup sealed_data2)
 
 ===============================================================================
