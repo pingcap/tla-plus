@@ -25,31 +25,35 @@
 
 EXTENDS Integers, FiniteSets, Sequences, TLC
 
-\* The threshold of items in the disk queue
+\* The threshold of items in the disk queue for abort
 CONSTANT AbortThreshold
 
 \* max data size of the whole raft-engine, the actual size does not matter in this spec
 CONSTANT MaxDataSize
 
+\* Initial persisted data for disk1 and disk2.
+\* The normal raft-engine's data is the Max(InitData1, InitData2)
+\* For a scratch start, InitData1 and InitData2 are 0.
 CONSTANT InitData1, InitData2
 
-\* head, tail for hedge File system's disk1 and disk2's queue, as well as normal file system's disk queue
-VARIABLES head_1, head_2, tail_1, tail_2, head, tail
+\* head, tail for hedge File system's disk1 and disk2's queue 
+VARIABLES head_1, head_2, tail_1, tail_2 
+
+\* normal file system's disk queue
+VARIABLES head, tail
 
 \* the raft-engine's sealed data (not actively appending data)
-VARIABLE sealed_data, sealed_data1, sealed_data2
+VARIABLES sealed_data, sealed_data1, sealed_data2
 
 \* the raft-engine's active data (actively appending data)
-VARIABLE active_data, active_data1, active_data2
+VARIABLES active_data, active_data1, active_data2
 
 \* which disk is aborted. 0 means both disks are working normally
 VARIABLE abort
 
-vars == <<head_1, head_2, tail_1, tail_2, head, tail, sealed_data, sealed_data1, sealed_data2, active_data, active_data1, active_data2, abort>>
 -------------------------------------------------------------------------------
 \* Helper functions.
 Max(a, b) == IF a > b THEN a ELSE b
-Min(a, b) == IF a < b THEN a ELSE b
 
 \* load disk data by simply a random number
 \* For simplicity, assuming the data before the nunber is needed
@@ -121,12 +125,21 @@ Purge(set, setX) ==
 
 \* rewrite old data (sealed_data)
 Rewrite ==  
-    \/ /\ head_1 >= head_2 
+    \/ /\ head_1 >= head_2 \* disk1 is primary disk
+       /\ abort = 0
        /\ Purge(sealed_data, sealed_data1)
        /\ sealed_data2' = sealed_data1'
-    \/ /\ head_1 < head_2
+       /\ UNCHANGED <<active_data2, active_data1, active_data>>
+    \/ /\ head_1 < head_2  \* disk2 is primary disk
+       /\ abort = 0
        /\ Purge(sealed_data, sealed_data2)
        /\ sealed_data1' = sealed_data2'
+       /\ UNCHANGED <<active_data2, active_data1, active_data>>
+    \/ /\ abort = 1
+       /\ UNCHANGED <<active_data2, active_data, sealed_data2, sealed_data>>
+    \/ /\ abort = 2
+       /\ UNCHANGED <<active_data1, active_data, sealed_data1, sealed_data>>
+ 
 
 \* seal the active_data
 \* Note: Seal must be called after PersistLog to ensure active_data1 correct
@@ -151,8 +164,8 @@ Seal ==
         /\ active_data' = {}
         /\ UNCHANGED  <<sealed_data2, active_data2>> 
 
-\* seal and rewrite cannot run concurrently due to the contest on sealed_data
-\* in the code, the file list is protected by the lock
+\* seal and rewrite cannot run concurrently due to the contest on sealed_data.
+\* In raft-engine's implementation, the file list is protected by the lock
 SealOrRewrite ==
 LET
     flag == RandomElement(0..1)
@@ -164,14 +177,16 @@ IN
     
 \* check if we need to abort one of the disk
 MaybeAbort ==
-        \/  /\  head_1 >= head_2 
+        \/  /\  head_1 >= head_2
             /\  \/  /\ tail_2 - head_2 > AbortThreshold
+                    /\ abort = 0
                     /\ abort' = 2
                 \/  /\ tail_2 - head_2 <= AbortThreshold
                     /\ abort' = 0
         \/  /\  head_1 < head_2 
             /\  \/  /\  tail_1 - head_1 > AbortThreshold
                     /\ abort' = 1
+                    /\ abort = 0
                 \/  /\ tail_1 - head_1 <= AbortThreshold
                     /\ abort' = 0
 
@@ -181,13 +196,11 @@ BackgroundCatchup ==
     \/  /\ abort = 1
         /\ sealed_data1' = sealed_data2'
         /\ active_data1' = active_data2'
-        \*/\ UNCHANGED <<sealed_data1, active_data1>> 
         /\ head_1' = head_2'
         /\ tail_1' = tail_2'
     \/  /\ abort = 2
         /\ sealed_data2' = sealed_data1'
         /\ active_data2' = active_data1'
-        \*/\ UNCHANGED <<sealed_data2, active_data2>>
         /\ head_2' = head_1'
         /\ tail_2' = tail_1'
 
@@ -213,7 +226,7 @@ Next ==
     \*/\ PrintT("tail_1=" \o ToString(tail_1) \o " tail_2=" \o ToString(tail_2) \o " tail=" \o ToString(tail))
     /\ AppendRaftLog
     /\ \/ Cardinality(active_data) < 5 /\ PersistLog /\ Unchanged
-       \/ Cardinality(active_data) >= 5 /\ Seal /\ UNCHANGED <<head_1, head_2, head>>
+       \/ Cardinality(active_data) >= 5 /\ SealOrRewrite /\ UNCHANGED <<head_1, head_2, head>>
     /\ MaybeAbort
     /\ BackgroundCatchup 
    
