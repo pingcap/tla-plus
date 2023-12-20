@@ -2,7 +2,7 @@ module memdb {
     import basicSpells.* from "./basicspells"
     type Key = int
     type Value = int
-    type Request = {id: int, kvs: Set[(Key, Value)]}
+    type Request = {id: int, generation: int, kvs: Set[(Key, Value)]}
     type Response = {id: int}
 
     pure def minKey = 1
@@ -26,7 +26,7 @@ module memdb {
     var clientWaitingReqIds: Set[int]
 
     // mock TiKV
-    var tikvDB: Key -> Value
+    var tikvDB: Key -> {generation: int, value: Value}
     
     var writtenKeys: Set[Key]
     // requests are always in flight, so it naturally imitates network retries.
@@ -34,6 +34,7 @@ module memdb {
     var inflightRequests: Set[Request]
     var inflightResponses: Set[Response]
     var nextID: int
+    var nextGeneration: int
 
     // functions ====================================
 
@@ -58,7 +59,7 @@ module memdb {
         } else if (immutableDB.has(k)) {
             immutableDB.get(k)
         } else if (tikvDB.has(k)) {
-            tikvDB.get(k)
+            tikvDB.get(k).value
         } else {
             -1
         }
@@ -76,6 +77,7 @@ module memdb {
         inflightRequests' = inflightRequests,
         inflightResponses' = inflightResponses,
         nextID' = nextID,
+        nextGeneration' = nextGeneration,
         clientWaitingReqIds' = clientWaitingReqIds,
     }
 
@@ -88,6 +90,7 @@ module memdb {
         immutableDB' = immutableDB,
         inflightRequests' = inflightRequests,
         nextID' = nextID,
+        nextGeneration' = nextGeneration,
         inflightResponses' = inflightResponses,
         clientWaitingReqIds' = clientWaitingReqIds,
     }
@@ -107,9 +110,11 @@ module memdb {
                 {
                     id: nextID,
                     kvs: mutableDB.keys().map(k => (k, mutableDB.get(k))),
+                    generation: nextGeneration,
                 }
             ),
         nextID' = nextID + 1,
+        nextGeneration' = nextGeneration + 1,
         writtenKeys' = writtenKeys,
         tikvDB' = tikvDB,
         correctDB' = correctDB,
@@ -117,7 +122,8 @@ module memdb {
     }
 
     action doTikvWrite(req: Request): bool = all {
-        tikvDB' = req.kvs.fold(tikvDB, (db, kv) => db.put(kv._1, kv._2)),
+        req.kvs.forall(kv => tikvDB.getOrElse(kv._1, {generation: -1, value: -1}).generation < req.generation),
+        tikvDB' = req.kvs.fold(tikvDB, (db, kv) => db.put(kv._1, {generation: req.generation, value: kv._2})),
         inflightResponses' = inflightResponses.union(Set({id: req.id})),
         inflightRequests' = inflightRequests,
         mutableDB' = mutableDB,
@@ -125,6 +131,7 @@ module memdb {
         writtenKeys' = writtenKeys,
         correctDB' = correctDB,
         nextID' = nextID,
+        nextGeneration' = nextGeneration,
         clientWaitingReqIds' = clientWaitingReqIds,
     }
 
@@ -162,6 +169,7 @@ module memdb {
         tikvDB' = tikvDB,
         correctDB' = correctDB,
         nextID' = nextID,
+        nextGeneration' = nextGeneration,
         clientWaitingReqIds' = clientWaitingReqIds.setRemove(req.id),
     }
 
@@ -175,6 +183,7 @@ module memdb {
         inflightResponses' = Set(),
         nextID' = 1,    
         clientWaitingReqIds' = Set(),
+        nextGeneration' = 1,
     }
 
     action step() = {
@@ -203,11 +212,7 @@ module memdb {
                                 .then(doTikvWriteWithId(2))
                                 .then(clientReceiveResponse)
                                 .then(doTikvWriteWithId(1))
-                                .then(all {
-                                        assert(equivalence),
-                                        unchanged,
-                                    }
-                                )
+                                .fail() // stale req cannot succeed
 
     // Invariants and properties ====================
     
