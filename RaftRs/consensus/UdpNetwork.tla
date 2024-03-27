@@ -132,14 +132,13 @@ _ReplyMsg(response, request, msgs) ==
 (***************************************************************************
   API NetGetMsg: Get msg from src -> dst FIFO head
     * return msg m
-    真的需要实现吗？？ 讨论
  ***************************************************************************)
 \* NetGetMsg(src, dst) == _GetMsg(src, dst, _msgs)
 
 (* inc unorder *)
 
 IsFirstMsg(m) ==
-    LET myMsg == { i \in _msgs: i.dst = m.dst }  \* 是否需要考虑src？
+    LET myMsg == { i \in _msgs: i.dst = m.dst }  
         first == CHOOSE i \in myMsg: i.seq <= m.seq
     IN  first = m
 
