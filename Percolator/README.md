@@ -13,9 +13,3 @@ This directory contains the TLA+ specification of Percolator, the transaction pr
 - Import the TLA+ toolbox configuration.
 
 Note TLAPS is optional. You can remove all TLAPS proof, it does not affect the model.
-
-## How to run in command line?
-
-- Download [tla2tools.jar](https://tla.msr-inria.inria.fr/tlatoolbox/dist/tla2tools.jar).
-- Install [TLAPS](https://tla.msr-inria.inria.fr/tlaps/content/Download/Binaries.html).
-- Execute `java -cp ./tla2tools.jar tlc2.TLC -deadlock -workers 4 Percolator`. `-worker 4` sets the number of worker threads, which should equal to the number of cores on machine.
